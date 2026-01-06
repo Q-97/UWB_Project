@@ -98,6 +98,7 @@ DEFAULT_ALGO_PARAMS = {
         "bandwidth": 100e6,
         "snapshots": 64,            # 论文规定：每帧包含 32 个 Chirp
         "cfar_threshold_db": 10.0,  # 论文规定：检测阈值系数为 15 dB
+        "music_forward_backward": True,  # <--- 新增：默认为 False
         # 论文中 CA-CFAR 的窗口设置
         "range_train": 3,           
         "range_guard": 1,           
@@ -815,6 +816,15 @@ class AlgorithmProcessor:
         x = phase_vec.reshape(-1, 1)
         R = x @ x.conj().T
         
+        # --- [新增：前后向平滑优化] ---
+        if params.get("music_forward_backward", False):
+            # 创建反对角矩阵 J
+            J = np.flip(np.eye(N), axis=0)
+            # 应用公式: R = 0.5 * (R + J * R_conj * J)
+            R = 0.5 * (R + J @ R.conj() @ J)
+        
+        # ----------------------------
+
         # 特征分解
         evals, evecs = np.linalg.eigh(R)
         # 假设信号源数量为 1
