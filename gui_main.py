@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Tuple, Optional, Any
 from collections import deque
 from scipy import ndimage, signal
+from scipy.signal.windows import chebwin
 
 # --- External Modules ---
 from UDP_data_listen import UDPFrameServer
@@ -120,7 +121,82 @@ DEFAULT_ALGO_PARAMS = {
         "aoa_scale": 1.0,         # 角度缩放比例，默认为 1.0
         "doppler_tx": 1,
         "doppler_rx": 6,
-    }
+    },
+
+    "POINT-CLOUD-OPTIMIZED": {
+        "center_freq": 7.9872e9,
+        "snapshots": 64,
+        "leakage_offset": 5,
+        "doppler_window": "chebyshev",
+        "doppler_win_atten": 60,
+        "doppler_dc_remove": True,
+        "cfar_method": "ca-cfar",
+        "cfar_threshold_db": 10.0,
+        "range_train": 3, "range_guard": 1,
+        "doppler_train": 4, "doppler_guard": 2,
+        "cfar_velocity_min": 1,
+        "cfar_velocity_max": 20,
+        "cfar_range_min": 2,
+        "cfar_range_max": 20,
+        "cfar_range_peak_flag": False,
+        "cfar_doppler_peak_flag": True,
+        "subbin_refine_en": True,
+        "aoa_method": "MUSIC",
+        "fft_n": 16, "antenna_spacing": 0.5,
+        "indices_azimuth": [2, 3, 6, 7],
+        "music_forward_backward": False,
+        "ant_dbf_select": [2, 3, 6, 7],
+        "azi_angle_range": [-70, 70],
+        "azimuth_num": 64,
+        "dbf_diff": 0,
+        "ant_calib_en": False,
+        "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "dist_per_tap": 0.1875,
+        "point_lifetime_sec": 1.5,
+        "plot_xlim": 1.5,
+        "plot_ylim_min": -2.5, "plot_ylim_max": 0.0,
+        "aoa_offset_deg": -12.0, "aoa_scale": 1.0,
+        "doppler_tx": 1, "doppler_rx": 6,
+        "cfar_only_selected": True,
+    },
+
+    "POINT-CLOUD-DUBHE": {
+        "center_freq": 7.9872e9,
+        "cir_combine_num": 5,
+        "ring_buffer_len": 50,
+        "slide_step": 20,
+        "leakage_offset": 5,
+        "doppler_win_en": True,
+        "doppler_win_coef": 60,
+        "doppler_dc_en": True,
+        "doppler_fft": 64,
+        "siso_ch": [2, 3, 6, 7],
+        "cfar_low_r_idx": 2, "cfar_high_r_idx": 12,
+        "cfar_low_v_idx": 1, "cfar_high_v_idx": 20,
+        "cfar_th": [10, 10],
+        "cfar_range_peak_flag": True,
+        "cfar_doppler_peak_flag": True,
+        "dynamic_filter_en": True,
+        "noi_edges": [-15, -5, 10, 20],
+        "cfar_th_dynamic": [15, 12, 10, 8, 7],
+        "ant_dbf_select": [2, 3, 6, 7],
+        "azi_angle_range": [-70, 70],
+        "azimuth_num": 64,
+        "dbf_diff": 0,
+        "aoa_method": "DBF",
+        "fft_n": 16,
+        "antenna_spacing": 0.5,
+        "music_forward_backward": False,
+        "aoa_offset_deg": -12.0,
+        "aoa_scale": 1.0,
+        "ant_calib_en": False,
+        "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "dist_per_tap": 0.1875,
+        "point_lifetime_sec": 1.5,
+        "plot_xlim": 1.5,
+        "plot_ylim_min": -2.5, "plot_ylim_max": 0.0,
+        "doppler_tx": 1, "doppler_rx": 6,
+    },
 
 
 }
@@ -355,8 +431,17 @@ class AlgorithmProcessor:
         self._reset_algo_state()
 
     def _reset_algo_state(self):
-        self.breathing_window = deque(maxlen=20) 
-        self.peak_window = deque(maxlen=10) 
+        self.breathing_window = deque(maxlen=20)
+        self.peak_window = deque(maxlen=10)
+        self._reset_dubhe_state()
+
+    def _reset_dubhe_state(self):
+        self.dubhe_accum = np.zeros((4, 2, 32), dtype=np.complex64)
+        self.dubhe_accum_cnt = 0
+        self.dubhe_ring = deque(maxlen=50)
+        self.dubhe_new_comb_cnt = 0
+        self._dbf_sv = None
+        self._dbf_angles = None
 
     def _init_music_if_needed(self):
         if self.init_done: return
@@ -932,6 +1017,125 @@ class AlgorithmProcessor:
         "breath_val": val_breath,       # <--- 新增：返回呼吸数值
         }
 
+    def step_point_cloud_optimized(self):
+        """
+        优化版点云算法: 加窗 + DC去除 + leakage roll + 速度/距离门限 + 峰值滤波 + 子网格细化
+        AoA 支持 FFT / MUSIC / DBF 三种方式
+        """
+        all_c = self.dm.get_all_snapshot_as_array('complex')
+        all_a = self.dm.get_all_snapshot_as_array('abs')
+        if all_c is None:
+            return None
+
+        params = self.config.algo_params['POINT-CLOUD-OPTIMIZED']
+        N_snaps = params['snapshots']
+        leakage_offset = params['leakage_offset']
+        current_cube = all_c[:, :, :, -N_snaps:]  # (4, 2, 32, N)
+
+        # 1. 泄漏处理: np.roll 替代截断
+        current_cube = np.roll(current_cube, -leakage_offset, axis=2)
+
+        # 2. 慢时间 DC 去除
+        if params.get('doppler_dc_remove', True):
+            current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
+
+        # 3. 慢时间加窗 (Chebyshev)
+        if params.get('doppler_window') == 'chebyshev':
+            atten = params.get('doppler_win_atten', 60)
+            win = chebwin(current_cube.shape[3], at=atten)
+            current_cube = current_cube * win[np.newaxis, np.newaxis, np.newaxis, :]
+
+        # 4. Doppler FFT
+        rd_cube = np.fft.fft(current_cube, axis=3)
+
+        # 5. 展平 8 通道 + 选通道 + 非相干合并
+        rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
+            8, rd_cube.shape[2], rd_cube.shape[3])
+        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
+        if params.get('cfar_only_selected', True):
+            rd_sel = rd_cube_flat[valid_indices, :, :]
+        else:
+            rd_sel = rd_cube_flat
+        power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)
+
+        # 6. CA-CFAR
+        mask, noise_avg = self.perform_ca_cfar_2d(power_map, params)
+
+        # 7. Velocity + Range gating (仿 Dubhe 双侧通带)
+        n_dop = power_map.shape[1]
+        v_min = params.get('cfar_velocity_min', 1)
+        v_max = params.get('cfar_velocity_max', 20)
+        vel_mask = np.zeros(n_dop, dtype=bool)
+        vel_mask[v_min:v_max] = True
+        vel_mask[n_dop - v_max:n_dop - v_min] = True
+        mask &= vel_mask[np.newaxis, :]
+
+        r_min = params.get('cfar_range_min', 2)
+        r_max = params.get('cfar_range_max', 20)
+        mask[:r_min, :] = False
+        mask[r_max:, :] = False
+
+        # 8. 局部峰值滤波
+        if params.get('cfar_doppler_peak_flag'):
+            mask &= (power_map == ndimage.maximum_filter(power_map, size=(1, 3)))
+        if params.get('cfar_range_peak_flag'):
+            mask &= (power_map == ndimage.maximum_filter(power_map, size=(3, 1)))
+
+        # 9. 检出 + 子网格细化 + AoA
+        hit_indices = np.argwhere(mask)
+        detected_points = []
+        for r_idx, d_idx in hit_indices:
+            r_fine, d_fine = r_idx, d_idx
+            if params.get('subbin_refine_en', True):
+                r_fine, d_fine = self._subbin_refine(power_map, r_idx, d_idx)
+
+            phase_vec_full = rd_cube_flat[:, r_idx, d_idx]
+            phase_vec_sel = phase_vec_full[valid_indices]
+
+            # AoA 分发: FFT / MUSIC / DBF
+            aoa_method = params.get('aoa_method', 'MUSIC')
+            if aoa_method == 'DBF':
+                if getattr(self, '_dbf_sv', None) is None:
+                    self._init_dbf_steering(params)
+                az_angle = self._dbf_estimate(phase_vec_sel, params)
+            else:
+                az_angle = self.estimate_aoa(phase_vec_sel, params)
+
+            dist = r_fine * params['dist_per_tap']
+            point_x = dist * np.sin(az_angle)
+            point_y = -dist * np.cos(az_angle)
+            snr_val = 10 * np.log10(
+                power_map[r_idx, d_idx] / (noise_avg[r_idx, d_idx] + 1e-12))
+            detected_points.append({
+                'pos': (point_x, point_y),
+                'snr': snr_val,
+                'time': time.time()
+            })
+
+        # 10. Breathing
+        dop_fft_n = params['snapshots']
+        val_breath = 0.0
+        try:
+            if all_a.shape[3] >= dop_fft_n:
+                dop_tx = params['doppler_tx']; dop_rx = params['doppler_rx']
+                tx_idx = self.config.udp_tx_list.index(dop_tx)
+                rx_idx = self.config.udp_rx_list.index(dop_rx)
+                recent_a = all_a[rx_idx, tx_idx, :, -dop_fft_n:]
+                val_breath, _, _, max_motion = find_breathing_feature(
+                    np.fft.fft(recent_a, axis=1),
+                    self.config.snapshot_rate, 0.15, 0.7, 0, 16)
+                if self.breathing_window.maxlen != 10:
+                    self.breathing_window = deque(list(self.breathing_window), maxlen=10)
+                self.breathing_window.append(val_breath)
+        except:
+            pass
+        val_breath = float(val_breath)
+        return {
+            "detected_points": detected_points,
+            "params": self.config.algo_params['POINT-CLOUD-OPTIMIZED'],
+            "breath_val": val_breath,
+        }
+
     def map_to_2d_grid(self, raw_vec):
         """
         将原始 8 通道数据映射到 2x5 虚拟面阵网格
@@ -956,8 +1160,225 @@ class AlgorithmProcessor:
         
         return grid
 
+    # ===== DBF & CFAR helpers (shared by OPTIMIZED and DUBHE) =====
 
+    def _subbin_refine(self, power_map, r_idx, d_idx):
+        """二次插值细化，返回 (r_fine, d_fine)"""
+        R, D = power_map.shape
+        r_lo, r_hi = max(0, r_idx - 1), min(R - 1, r_idx + 1)
+        d_lo, d_hi = max(0, d_idx - 1), min(D - 1, d_idx + 1)
 
+        r_fine = float(r_idx)
+        if r_lo < r_idx < r_hi:
+            a, b, c = power_map[r_lo, d_idx], power_map[r_idx, d_idx], power_map[r_hi, d_idx]
+            denom = a - 2 * b + c
+            if abs(denom) > 1e-12:
+                r_fine = r_idx + (a - c) / (2 * denom)
+
+        d_fine = float(d_idx)
+        if d_lo < d_idx < d_hi:
+            a, b, c = power_map[r_idx, d_lo], power_map[r_idx, d_idx], power_map[r_idx, d_hi]
+            denom = a - 2 * b + c
+            if abs(denom) > 1e-12:
+                d_fine = d_idx + (a - c) / (2 * denom)
+
+        return r_fine, d_fine
+
+    def _init_dbf_steering(self, params):
+        """预计算 DBF 引导矢量矩阵（OPTIMIZED 和 DUBHE 共用）"""
+        wavelength = 2.99792458e8 / params['center_freq']
+        channels = params.get('ant_dbf_select', params.get('siso_ch', [2, 3, 6, 7]))
+        # 8通道虚拟天线 x 坐标 (m): [TX1-RX4, TX1-RX5, TX1-RX6, TX1-RX7,
+        #                            TX2-RX4, TX2-RX5, TX2-RX6, TX2-RX7]
+        all_virt_x = np.array([-0.038, 0.0, -0.038, -0.019, 0.0, 0.038, 0.0, 0.019])
+        ant_x = all_virt_x[channels] / wavelength
+
+        azi_deg = np.linspace(params['azi_angle_range'][0],
+                              params['azi_angle_range'][1],
+                              params['azimuth_num'])
+        self._dbf_angles = np.deg2rad(azi_deg)
+        self._dbf_sv = np.exp(-1j * 2 * np.pi *
+                              ant_x[:, np.newaxis] * np.sin(self._dbf_angles[np.newaxis, :]))
+
+        # 相位标定: 对齐 Dubhe 文档 Section 3.8.3 / Table 9
+        if params.get('ant_calib_en', False):
+            calib_phase = np.array(params.get('ant_calib_phase',
+                                  [0] * 8), dtype=np.float64)
+            calib = np.exp(1j * calib_phase[channels])
+            self._dbf_sv = self._dbf_sv * calib[:, np.newaxis]
+
+    def _dbf_estimate(self, phase_vec, params):
+        """DBF 方位角估计，返回弧度"""
+        x = phase_vec.reshape(-1, 1)
+        pwr = np.abs(self._dbf_sv.conj().T @ x) ** 2
+        pwr = pwr.flatten()
+        peak_idx = np.argmax(pwr)
+        az = self._dbf_angles[peak_idx]
+
+        # 主瓣滤波
+        dbf_diff = params.get('dbf_diff', 0)
+        if dbf_diff > 0:
+            n_azi = len(self._dbf_angles)
+            guard = max(3, n_azi // 16)
+            side_mask = np.ones(n_azi, dtype=bool)
+            lo = max(0, peak_idx - guard)
+            hi = min(n_azi, peak_idx + guard + 1)
+            side_mask[lo:hi] = False
+            side_pwr = np.mean(pwr[side_mask]) if np.any(side_mask) else 0.0
+            if side_pwr > 1e-12:
+                ratio_db = 10 * np.log10(pwr[peak_idx] / side_pwr)
+                if ratio_db < dbf_diff:
+                    return 0.0
+        return az
+
+    def step_point_cloud_dubhe(self):
+        """
+        Dubhe CPD 风格点云算法 (2D only):
+        相干积累 → ring buffer → leakage roll → Chebyshev 窗 → DC 去除 → Doppler FFT
+        → SISO 非相干合并 → NVE 噪底估计 → SNR 图 → CFAR 检测
+        → 速度/距离门限 → 峰值滤波 → 5 区动态后滤波 → DBF 方位角
+        """
+        all_c = self.dm.get_all_snapshot_as_array('complex')
+        all_a = self.dm.get_all_snapshot_as_array('abs')
+        if all_c is None:
+            return None
+
+        params = self.config.algo_params['POINT-CLOUD-DUBHE']
+        cir_comb = params['cir_combine_num']
+        ring_len = params['ring_buffer_len']
+        slide = params['slide_step']
+
+        # --- Phase 1: 相干积累 (post background-removal) ---
+        n_frames = all_c.shape[3]
+        for i in range(n_frames):
+            frame = all_c[:, :, :, i]  # (4, 2, 32)
+            self.dubhe_accum += frame
+            self.dubhe_accum_cnt += 1
+            if self.dubhe_accum_cnt >= cir_comb:
+                combined = self.dubhe_accum / cir_comb
+                self.dubhe_ring.append(combined)
+                self.dubhe_new_comb_cnt += 1
+                self.dubhe_accum = np.zeros((4, 2, 32), dtype=np.complex64)
+                self.dubhe_accum_cnt = 0
+
+        # --- Phase 2: 判断是否输出 ---
+        if len(self.dubhe_ring) < ring_len:
+            return None
+        if self.dubhe_new_comb_cnt < slide:
+            return None
+        self.dubhe_new_comb_cnt = 0
+
+        # --- Phase 3: 取最近 ring_len 帧并转置 ---
+        ring_data = np.array(list(self.dubhe_ring)[-ring_len:])  # (ring_len, 4, 2, 32)
+        cube_2d = ring_data.transpose(1, 2, 3, 0)  # (4, 2, 32, ring_len)
+
+        # --- Phase 4: leakage roll ---
+        cube_2d = np.roll(cube_2d, -params['leakage_offset'], axis=2)
+
+        # --- Phase 5: DC removal + Chebyshev window ---
+        if params['doppler_dc_en']:
+            cube_2d = cube_2d - np.mean(cube_2d, axis=3, keepdims=True)
+        if params['doppler_win_en']:
+            win = chebwin(cube_2d.shape[3], at=params['doppler_win_coef'])
+            cube_2d = cube_2d * win[np.newaxis, np.newaxis, np.newaxis, :]
+
+        # --- Phase 6: Doppler FFT ---
+        n_fft = params['doppler_fft']
+        rd_cube = np.fft.fft(cube_2d, n=n_fft, axis=3)
+
+        # --- Phase 7: SISO 非相干合并 ---
+        rd_flat = rd_cube.transpose(1, 0, 2, 3).reshape(8, rd_cube.shape[2], n_fft)
+        siso_ch = params['siso_ch']
+        rd_sel = rd_flat[siso_ch, :, :]
+        power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)
+
+        # --- Phase 8: NVE (沿 Doppler 轴取中值) ---
+        noise_floor = np.median(power_map, axis=1, keepdims=True)
+        noise_floor = np.maximum(noise_floor, 1e-12)
+
+        # --- Phase 9: SNR 图 + CFAR 初次筛选 ---
+        snr_map = 10 * np.log10(power_map / noise_floor)
+        cfar_th = params['cfar_th'][0]
+        mask = snr_map > cfar_th
+
+        # --- Phase 10: 距离/速度门 + 峰值滤波 ---
+        low_r, high_r = params['cfar_low_r_idx'], params['cfar_high_r_idx']
+        low_v, high_v = params['cfar_low_v_idx'], params['cfar_high_v_idx']
+        mask[:low_r, :] = False
+        mask[high_r:, :] = False
+
+        vel_mask = np.zeros(n_fft, dtype=bool)
+        vel_mask[low_v:high_v] = True
+        vel_mask[n_fft - high_v:n_fft - low_v] = True
+        mask &= vel_mask[np.newaxis, :]
+
+        if params['cfar_doppler_peak_flag']:
+            mask &= (power_map == ndimage.maximum_filter(power_map, size=(1, 3)))
+        if params['cfar_range_peak_flag']:
+            mask &= (power_map == ndimage.maximum_filter(power_map, size=(3, 1)))
+
+        # --- Phase 11: 5 区动态后滤波 ---
+        # 注意: noi_edges 的绝对值依赖硬件 ADC 标定。此处用 SNR 图的中值
+        # 作为环境噪声代理指标，自动选择动态门限。
+        if params.get('dynamic_filter_en', True):
+            noise_level_val = np.median(noise_floor)
+            noise_db = 10 * np.log10(noise_level_val + 1e-12)
+            edges = params['noi_edges']
+            dyn_th = params['cfar_th_dynamic']
+            zone_idx = np.searchsorted(edges, noise_db)
+            # clamp to valid range
+            zone_idx = max(0, min(zone_idx, len(dyn_th) - 1))
+            dyn_threshold = dyn_th[zone_idx]
+            mask &= snr_map > dyn_threshold
+
+        # --- Phase 12: 检出 + 子网格细化 + AoA ---
+        aoa_method = params.get('aoa_method', 'DBF')
+        if aoa_method == 'DBF' and getattr(self, '_dbf_sv', None) is None:
+            self._init_dbf_steering(params)
+
+        hit_indices = np.argwhere(mask)
+        detected_points = []
+        for r_idx, d_idx in hit_indices:
+            r_fine, d_fine = self._subbin_refine(snr_map, r_idx, d_idx)
+
+            phase_vec = rd_flat[siso_ch, r_idx, d_idx]
+            if aoa_method == 'DBF':
+                az_angle = self._dbf_estimate(phase_vec, params)
+            else:
+                az_angle = self.estimate_aoa(phase_vec, params)
+
+            dist = r_fine * params['dist_per_tap']
+            point_x = dist * np.sin(az_angle)
+            point_y = -dist * np.cos(az_angle)
+            snr_val = snr_map[r_idx, d_idx]
+            detected_points.append({
+                'pos': (point_x, point_y),
+                'snr': snr_val,
+                'time': time.time()
+            })
+
+        # --- Phase 13: Breathing ---
+        val_breath = 0.0
+        try:
+            if all_a.shape[3] >= 16:
+                dop_tx = params['doppler_tx']; dop_rx = params['doppler_rx']
+                tx_idx = self.config.udp_tx_list.index(dop_tx)
+                rx_idx = self.config.udp_rx_list.index(dop_rx)
+                recent_a = all_a[rx_idx, tx_idx, :, -16:]
+                val_breath, _, _, max_motion = find_breathing_feature(
+                    np.fft.fft(recent_a, axis=1),
+                    self.config.snapshot_rate, 0.15, 0.7, 0, 16)
+                if self.breathing_window.maxlen != 10:
+                    self.breathing_window = deque(list(self.breathing_window), maxlen=10)
+                self.breathing_window.append(val_breath)
+        except:
+            pass
+        val_breath = float(val_breath)
+        return {
+            "detected_points": detected_points,
+            "params": self.config.algo_params['POINT-CLOUD-DUBHE'],
+            "breath_val": val_breath,
+        }
 
 
 
@@ -1208,19 +1629,19 @@ class PlotPanel(tk.Frame):
                 ax3.add_patch(plt.Rectangle((-0.65, -1.8), 1.3, 1.8, ec='blue', fc='none', lw=2))
             else: ax3.set_rmax(3.5); ax3.set_theta_zero_location('S')
             self.axes = {'music': ax1, 'dop': ax2, 'fus': ax3}
-        elif mode == 'POINT-CLOUD':
+        elif mode in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE'):
             ax = self.figure.add_subplot(111)
-            # 按照论文表 II 设置坐标范围：X 为 +/- 1.5m，Y 为 -2.5m 到 0m [cite: 332, 345]
             ax.set_xlim(-params.get('plot_xlim', 1.5), params.get('plot_xlim', 1.5))
             ax.set_ylim(params.get('plot_ylim_min', -2.5), params.get('plot_ylim_max', 0))
-            ax.set_title("Vehicle Occupancy Point Cloud (CA-CFAR)")
+            mode_titles = {
+                'POINT-CLOUD': "Vehicle Occupancy Point Cloud (CA-CFAR)",
+                'POINT-CLOUD-OPTIMIZED': "Vehicle Occupancy Point Cloud (Optimized)",
+                'POINT-CLOUD-DUBHE': "Vehicle Occupancy Point Cloud (Dubhe CPD)",
+            }
+            ax.set_title(mode_titles.get(mode, "Point Cloud"))
             ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
             ax.grid(True, linestyle=':', alpha=0.6)
-            
-            # 初始化散点图对象
             self.plots['pc_scatter'] = ax.scatter([], [], c=[], cmap='cool', s=30, alpha=0.8)
-            
-            # 绘制座椅椭圆参考线（根据论文表 II 几何参数 [cite: 332]）
             self._draw_seating_ellipses(ax, params)
             self.axes['main'] = ax
         self.canvas.draw()
@@ -1282,20 +1703,21 @@ class PlotPanel(tk.Frame):
                 else: self.plots['tgt'].set_data([tx], [ty])
             else: self.plots['tgt'].set_data([], [])
             self.axes['fus'].set_title(f"Breath: {data['breath_val']:.2f} | Motion: {data['max_motion']:.2f}")
-        elif mode == 'POINT-CLOUD':
+        elif mode in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE'):
             if not data or 'detected_points' not in data: return
             p = data['params']
             breath_val = data.get('breath_val', 0.0)
-            # --- 新增：动态更新标题逻辑 ---
-            base_title = "Vehicle Occupancy Point Cloud (CA-CFAR)"
+            mode_titles = {
+                'POINT-CLOUD': "Vehicle Occupancy Point Cloud (CA-CFAR)",
+                'POINT-CLOUD-OPTIMIZED': "Vehicle Occupancy Point Cloud (Optimized)",
+                'POINT-CLOUD-DUBHE': "Vehicle Occupancy Point Cloud (Dubhe CPD)",
+            }
+            base_title = mode_titles.get(mode, "Point Cloud")
             info_text = f"Breath: {breath_val:.3f}"
             if 'filename' in data:
-                # 在回放模式下显示文件名
                 self.axes['main'].set_title(f"{base_title} ({info_text})\nFile: {data['filename']}", fontsize=10)
             else:
-                # 实时模式下显示默认标题
                 self.axes['main'].set_title(f"{base_title}\n{info_text}")
-            # ----------------------------
 
             current_time = time.time()
             lifetime = p.get('point_lifetime_sec', 1.5)
@@ -1407,7 +1829,7 @@ class ControlPanel(tk.Frame):
         row1 = tk.Frame(frm_algo, bg='#f0f0f0')
         row1.pack(fill='x', padx=2)
         tk.Label(row1, text="Algo:", bg='#f0f0f0').pack(side='left')
-        self.cb_algo = ttk.Combobox(row1, values=('PLOT', '2D-MUSIC','POINT-CLOUD'), width=10, state='readonly')
+        self.cb_algo = ttk.Combobox(row1, values=('PLOT', '2D-MUSIC', 'POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE'), width=18, state='readonly')
         self.cb_algo.set(config.current_algo)
         self.cb_algo.pack(side='left')
         self.cb_algo.bind("<<ComboboxSelected>>", self._on_algo_change)
@@ -1806,10 +2228,15 @@ class App:
                     d = self.algo_processor.step_waveform()
                 elif m == '2D-MUSIC':
                     d = self.algo_processor.step_2d_music()
-                elif m == 'POINT-CLOUD':
-                    d = self.algo_processor.step_point_cloud()
-                    
-                    # 导出逻辑：现在它只会在有新帧进来时运行一次
+                elif m in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE'):
+                    if m == 'POINT-CLOUD':
+                        d = self.algo_processor.step_point_cloud()
+                    elif m == 'POINT-CLOUD-OPTIMIZED':
+                        d = self.algo_processor.step_point_cloud_optimized()
+                    else:
+                        d = self.algo_processor.step_point_cloud_dubhe()
+
+                    # 导出逻辑 (三个点云模式共享)
                     if d and self.config.connection_mode == 'PLAYBACK':
                         d['filename'] = os.path.basename(self.config.playback_file)
                         if self.config.export_pc_json:
@@ -1819,7 +2246,7 @@ class App:
                                 "points": d.get("detected_points", [])
                             }
                             self.pc_export_data.append(export_frame)
-                
+
                 if d:
                     self.plot_panel.update_data(m, d)
 
