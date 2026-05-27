@@ -198,6 +198,26 @@ DEFAULT_ALGO_PARAMS = {
         "doppler_tx": 1, "doppler_rx": 6,
     },
 
+    "SEAT-OCCUPANCY": {
+        "enable": True,
+        "seat_type": "4_seats",
+        "seats_4": [
+            {"name": "1", "cx": -0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "th": 0.010},
+            {"name": "2", "cx":  0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "th": 0.010},
+            {"name": "3", "cx": -0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "th": 0.005},
+            {"name": "4", "cx":  0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "th": 0.005},
+        ],
+        "seats_5": [
+            {"name": "1", "cx": -0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "th": 0.010},
+            {"name": "2", "cx":  0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "th": 0.010},
+            {"name": "3", "cx": -0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005},
+            {"name": "4", "cx":  0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005},
+            {"name": "5", "cx":  0.00, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005},
+        ],
+        "smooth_window": 3,
+        "smooth_threshold": 0.5,
+    },
+
 
 }
 
@@ -1383,6 +1403,105 @@ class AlgorithmProcessor:
 
 
 # ==============================================================================
+# 3.5 Seat Occupancy Detector (论文: Vehicle Occupancy Detector Based on
+#     FMCW mm-Wave Radar at 77 GHz, Section IV)
+# ==============================================================================
+class SeatOccupancyDetector:
+    """
+    基于规则的座椅占用检测器, 对齐论文公式 (12)-(16).
+    输入任意点云算法的 detected_points, 输出每座椅占用状态.
+    """
+
+    def __init__(self, params):
+        self.params = params
+        self._load_seats()
+        self.state_history = {s['name']: deque(maxlen=params.get('smooth_window', 3))
+                              for s in self.seats}
+        # 当前平滑后的占用状态
+        self.occupancy = {s['name']: 0 for s in self.seats}
+        # 最近一次的 f_k 值, 用于调试/显示
+        self.f_values = {s['name']: 0.0 for s in self.seats}
+
+    def _load_seats(self):
+        seat_type = self.params.get('seat_type', '4_seats')
+        key = 'seats_4' if seat_type == '4_seats' else 'seats_5'
+        self.seats = self.params.get(key, self.params.get('seats_4', []))
+
+    def _point_in_ellipse(self, x, y, seat):
+        """公式 (12): 判断点是否在椭圆区域内"""
+        xn = (x - seat['cx']) / seat['rx']
+        yn = (y - seat['cy']) / seat['ry']
+        return (xn * xn + yn * yn) < 1.0
+
+    def _compute_dispersion(self, points):
+        """公式 (13): 计算点集的空间分散度 σ_k"""
+        if len(points) < 2:
+            return 0.0
+        pts = np.array(points)
+        mean = np.mean(pts, axis=0)
+        dists = np.sqrt(np.sum((pts - mean) ** 2, axis=1))
+        return float(np.sqrt(np.mean(dists ** 2)))
+
+    def process(self, detected_points):
+        """
+        输入: detected_points = [{'pos': (x,y), ...}, ...]
+        输出: occupancy dict {'1':0/1, '2':0/1, '3':0/1, '4':0/1}
+        """
+        N = len(detected_points)
+        if N == 0:
+            # 无点云 → 所有座椅平滑为 0
+            for name in self.occupancy:
+                self.state_history[name].append(0)
+            self._smooth()
+            return dict(self.occupancy), dict(self.f_values)
+
+        # 1. 椭圆筛选 + 每座椅 N_k 和 σ_k
+        seat_points = {}
+        for seat in self.seats:
+            pts = [(p['pos'][0], p['pos'][1]) for p in detected_points
+                   if self._point_in_ellipse(p['pos'][0], p['pos'][1], seat)]
+            seat_points[seat['name']] = pts
+
+        N_list = [len(seat_points[s['name']]) for s in self.seats]
+        sigma_list = [self._compute_dispersion(seat_points[s['name']])
+                      for s in self.seats]
+
+        # 2. 公式 (14): 归一化特征 f_k
+        products = [sigma_list[i] * (N_list[i] / N) for i in range(len(self.seats))]
+        denom = sum(products)
+        if denom < 1e-12:
+            f_values_list = [0.0] * len(self.seats)
+        else:
+            f_values_list = [p / denom for p in products]
+
+        for i, seat in enumerate(self.seats):
+            self.f_values[seat['name']] = f_values_list[i]
+
+        # 3. 公式 (15): 阈值判决
+        for i, seat in enumerate(self.seats):
+            so_instant = 1 if f_values_list[i] > seat['th'] else 0
+            self.state_history[seat['name']].append(so_instant)
+
+        # 4. 公式 (16): 滑动平均平滑
+        self._smooth()
+        return dict(self.occupancy), dict(self.f_values)
+
+    def _smooth(self):
+        """公式 (16): 滑动平均 + 阈值 m=0.5"""
+        m = self.params.get('smooth_threshold', 0.5)
+        for name, hist in self.state_history.items():
+            if len(hist) > 0:
+                avg = sum(hist) / len(hist)
+                self.occupancy[name] = 1 if avg > m else 0
+
+    def get_seat_ellipses(self):
+        """供 PlotPanel 绘图使用, 返回椭圆参数列表"""
+        return [{'center': (s['cx'], s['cy']),
+                 'rx': s['rx'], 'ry': s['ry'],
+                 'name': s['name']} for s in self.seats]
+
+
+# ==============================================================================
 # 4. IO Layer
 # ==============================================================================
 class LiveRadarSource:
@@ -1642,7 +1761,10 @@ class PlotPanel(tk.Frame):
             ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
             ax.grid(True, linestyle=':', alpha=0.6)
             self.plots['pc_scatter'] = ax.scatter([], [], c=[], cmap='cool', s=30, alpha=0.8)
-            self._draw_seating_ellipses(ax, params)
+            # 优先从 SEAT-OCCUPANCY 配置读取椭圆, 回退到原有硬编码
+            occ_params = params.copy()
+            occ_params['occupancy_config'] = params.get('occupancy_config', None)
+            self._draw_seating_ellipses(ax, occ_params)
             self.axes['main'] = ax
         self.canvas.draw()
 
@@ -1749,50 +1871,237 @@ class PlotPanel(tk.Frame):
             else:
                 self.plots['pc_scatter'].set_offsets(np.empty((0, 2)))
 
+            # 座位占用状态着色
+            occupancy = data.get('occupancy', None)
+            if occupancy is not None:
+                self._update_seat_colors(occupancy)
+                occ_str = '|'.join(f"{n}={occupancy.get(n, 0)}" for n in ['1','2','3','4'])
+                f_vals = data.get('f_values', {})
+                f_str = '|'.join(f"{n}={f_vals.get(n, 0):.3f}" for n in ['1','2','3','4'])
+                occ_title = f"Occ: [{occ_str}]  f_k: [{f_str}]"
+                current_title = self.axes['main'].get_title()
+                if 'Occ:' not in current_title:
+                    self.axes['main'].set_title(f"{current_title}\n{occ_title}")
+
             self.canvas.draw_idle() # 使用 draw_idle 提高响应速度
         self.canvas.draw()
 
     def _draw_seating_ellipses(self, ax, params):
         """
-        根据论文 Table II 的几何参数绘制座椅参考椭圆 [cite: 332, 345]
+        根据 SEAT-OCCUPANCY 配置绘制座椅椭圆, 支持动态着色.
+        若配置不存在则回退到论文 Table II 硬编码值.
         """
-        # 获取车辆配置（4座或5座）
-        is_5_seater = (params.get("seat_type") == "5_seats")
-        
-        # 论文 Table II 核心参数:
-        # 前排中心 y = -0.6m, 后排中心 y = -0.6 - 0.8 = -1.4m
-        # 左右间距 0.6m -> x = ±0.3m
-        # 半长轴 (Semi-axis) 大约为 0.2m
-        
-        if not is_5_seater:
-            # 4座车布局 [cite: 169, 332]
-            seats = [
-                {'center': (-0.3, -0.6), 'name': '1'}, # Driver
-                {'center': (0.3, -0.6),  'name': '2'}, # Passenger
-                {'center': (-0.3, -1.4), 'name': '3'}, # Rear-L
-                {'center': (0.3, -1.4),  'name': '4'}  # Rear-R
-            ]
-            rx, ry = 0.2, 0.2 # 椭圆半径 
-        else:
-            # 5座车布局 [cite: 169, 332]
-            seats = [
-                {'center': (-0.3, -0.5), 'name': '1'},
-                {'center': (0.3, -0.5),  'name': '2'},
-                {'center': (-0.4, -1.3), 'name': '3'},
-                {'center': (0, -1.3),    'name': '5'}, # 后排中间
-                {'center': (0.4, -1.3),  'name': '4'}
-            ]
-            rx, ry = 0.25, 0.2 # 5座车前排稍宽 
+        occ_cfg = params.get('occupancy_config', None)
 
+        if occ_cfg:
+            seat_type = occ_cfg.get('seat_type', '4_seats')
+            key = 'seats_4' if seat_type == '4_seats' else 'seats_5'
+            seat_defs = occ_cfg.get(key, occ_cfg.get('seats_4', []))
+            seats = []
+            for sd in seat_defs:
+                seats.append({
+                    'center': (sd['cx'], sd['cy']),
+                    'rx': sd['rx'], 'ry': sd['ry'],
+                    'name': sd['name'],
+                })
+        else:
+            # fallback: 原硬编码逻辑
+            is_5 = (params.get('seat_type') == '5_seats')
+            if not is_5:
+                seats = [
+                    {'center': (-0.3, -0.6), 'rx': 0.2, 'ry': 0.2, 'name': '1'},
+                    {'center': (0.3, -0.6),  'rx': 0.2, 'ry': 0.2, 'name': '2'},
+                    {'center': (-0.3, -1.4), 'rx': 0.2, 'ry': 0.2, 'name': '3'},
+                    {'center': (0.3, -1.4),  'rx': 0.2, 'ry': 0.2, 'name': '4'},
+                ]
+            else:
+                seats = [
+                    {'center': (-0.3, -0.5), 'rx': 0.25, 'ry': 0.2, 'name': '1'},
+                    {'center': (0.3, -0.5),  'rx': 0.25, 'ry': 0.2, 'name': '2'},
+                    {'center': (-0.4, -1.3), 'rx': 0.25, 'ry': 0.2, 'name': '3'},
+                    {'center': (0, -1.3),    'rx': 0.25, 'ry': 0.2, 'name': '5'},
+                    {'center': (0.4, -1.3),  'rx': 0.25, 'ry': 0.2, 'name': '4'},
+                ]
+
+        self._seat_patches = {}
+        self._seat_texts = {}
         for s in seats:
-            # 使用论文公式 (12) 定义的区域绘制椭圆 
             ellipse = patches.Ellipse(
-                s['center'], width=rx*2, height=ry*2,
-                edgecolor='red', facecolor='none', 
-                linestyle='--', linewidth=1.5, alpha=0.7
+                s['center'], width=s['rx'] * 2, height=s['ry'] * 2,
+                edgecolor='green', facecolor='none',
+                linestyle='--', linewidth=2.0, alpha=0.8
             )
             ax.add_patch(ellipse)
-            ax.text(s['center'][0], s['center'][1], s['name'], color='red', ha='center')        
+            txt = ax.text(s['center'][0], s['center'][1], s['name'],
+                          color='green', ha='center', fontweight='bold')
+            self._seat_patches[s['name']] = ellipse
+            self._seat_texts[s['name']] = txt
+
+    def _update_seat_colors(self, occupancy):
+        """根据占用状态更新椭圆颜色: 占用=红, 空闲=绿"""
+        if not hasattr(self, '_seat_patches'):
+            return
+        for name, patch in self._seat_patches.items():
+            occ = occupancy.get(name, 2) if isinstance(occupancy, dict) else 0
+            if occ == 1:
+                patch.set_edgecolor('red')
+                patch.set_linewidth(3.0)
+                if name in self._seat_texts:
+                    self._seat_texts[name].set_color('red')
+            else:
+                patch.set_edgecolor('green')
+                patch.set_linewidth(2.0)
+                if name in self._seat_texts:
+                    self._seat_texts[name].set_color('green')
+
+# ==============================================================================
+# 3.6 座椅配置对话框
+# ==============================================================================
+class SeatConfigDialog(tk.Toplevel):
+    """座椅占用检测参数配置面板，每座椅独立调节"""
+
+    def __init__(self, parent, occ_params, callback):
+        super().__init__(parent)
+        self.title("座椅占用检测配置")
+        self.minsize(520, 480)
+        self.resizable(True, True)
+        self.occ_params = occ_params.copy()
+        self.callback = callback
+
+        self._build_ui()
+        self._load_params()
+
+    def _build_ui(self):
+        # 顶层: 使能 + 车型 + 平滑参数
+        top = tk.LabelFrame(self, text="全局设置", padx=10, pady=5)
+        top.pack(fill='x', padx=10, pady=5)
+
+        self.var_enable = tk.BooleanVar()
+        tk.Checkbutton(top, text="启用座椅占用检测", variable=self.var_enable).grid(row=0, column=0, sticky='w')
+
+        tk.Label(top, text="车型:").grid(row=0, column=1, padx=(20, 5))
+        self.var_seat_type = tk.StringVar(value='4_seats')
+        ttk.Combobox(top, textvariable=self.var_seat_type,
+                     values=('4_seats', '5_seats'), width=8, state='readonly').grid(row=0, column=2)
+
+        tk.Label(top, text="平滑帧数:").grid(row=0, column=3, padx=(20, 5))
+        self.var_smooth = tk.StringVar(value='3')
+        tk.Spinbox(top, textvariable=self.var_smooth, from_=1, to=10, width=4).grid(row=0, column=4)
+
+        tk.Label(top, text="平滑阈值:").grid(row=0, column=5, padx=(10, 5))
+        self.var_smooth_th = tk.StringVar(value='0.5')
+        tk.Spinbox(top, textvariable=self.var_smooth_th, from_=0.1, to=1.0, increment=0.1, width=4).grid(row=0, column=6)
+
+        # 座椅参数卡片 (4 或 5 个)
+        seat_frame = tk.LabelFrame(self, text="座椅椭圆参数 (cx/cy=中心坐标, rx/ry=半轴, TH=检测阈值)", padx=10, pady=5)
+        seat_frame.pack(fill='both', expand=True, padx=10, pady=5)
+
+        # 画布+滚动条
+        canvas = tk.Canvas(seat_frame, height=280)
+        scrollbar = ttk.Scrollbar(seat_frame, orient='vertical', command=canvas.yview)
+        self.seat_inner = tk.Frame(canvas)
+        self.seat_inner.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.create_window((0, 0), window=self.seat_inner, anchor='nw')
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side='left', fill='both', expand=True)
+        scrollbar.pack(side='right', fill='y')
+
+        # 表头
+        headers = ['座椅', '名称', '中心X\ncx (m)', '中心Y\ncy (m)',
+                   '半轴X\nrx (m)', '半轴Y\nry (m)', '阈值\nTH']
+        for j, h in enumerate(headers):
+            tk.Label(self.seat_inner, text=h, font=('Arial', 8, 'bold'),
+                     width=8, anchor='center', relief='ridge', bg='#e0e0e0').grid(row=0, column=j, padx=1, pady=1)
+
+        # 为 5 个座椅各建一行控件 (4座显示前4行, 5座显示全部)
+        self.seat_vars = []
+        for i in range(5):
+            row_vars = {}
+            tk.Label(self.seat_inner, text=f"座椅{i+1}", anchor='center').grid(row=i+1, column=0, padx=1, pady=1)
+
+            v_name = tk.StringVar(value=str(i+1))
+            tk.Entry(self.seat_inner, textvariable=v_name, width=4).grid(row=i+1, column=1, padx=1)
+
+            v_cx = tk.StringVar(value='0.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_cx, from_=-3.0, to=3.0, increment=0.05, width=5).grid(row=i+1, column=2, padx=1)
+
+            v_cy = tk.StringVar(value='0.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_cy, from_=-3.0, to=0.0, increment=0.05, width=5).grid(row=i+1, column=3, padx=1)
+
+            v_rx = tk.StringVar(value='0.2')
+            tk.Spinbox(self.seat_inner, textvariable=v_rx, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=4, padx=1)
+
+            v_ry = tk.StringVar(value='0.2')
+            tk.Spinbox(self.seat_inner, textvariable=v_ry, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=5, padx=1)
+
+            v_th = tk.StringVar(value='0.01')
+            tk.Spinbox(self.seat_inner, textvariable=v_th, from_=0.001, to=0.5, increment=0.001, width=5).grid(row=i+1, column=6, padx=1)
+
+            self.seat_vars.append({'name': v_name, 'cx': v_cx, 'cy': v_cy,
+                                    'rx': v_rx, 'ry': v_ry, 'th': v_th})
+
+        # 底部按钮
+        btn_row = tk.Frame(self, pady=10)
+        btn_row.pack(fill='x', padx=10)
+        tk.Button(btn_row, text="  保存  ", bg='#cfc', width=10,
+                  command=self._save).pack(side='left', padx=(20, 10))
+        tk.Button(btn_row, text=" 取消 ", width=10,
+                  command=self.destroy).pack(side='left', padx=10)
+        tk.Label(btn_row, text="修改后点击保存即生效，椭圆会实时刷新",
+                 fg='gray').pack(side='right', padx=10)
+
+    def _load_params(self):
+        """从 occ_params 字典加载到 UI 控件"""
+        p = self.occ_params
+        self.var_enable.set(p.get('enable', True))
+        self.var_seat_type.set(p.get('seat_type', '4_seats'))
+        self.var_smooth.set(str(p.get('smooth_window', 3)))
+        self.var_smooth_th.set(str(p.get('smooth_threshold', 0.5)))
+
+        key = 'seats_4' if self.var_seat_type.get() == '4_seats' else 'seats_5'
+        seats = p.get(key, p.get('seats_4', []))
+        for i, sv in enumerate(self.seat_vars):
+            if i < len(seats):
+                s = seats[i]
+                sv['name'].set(s.get('name', str(i+1)))
+                sv['cx'].set(str(s.get('cx', 0.0)))
+                sv['cy'].set(str(s.get('cy', 0.0)))
+                sv['rx'].set(str(s.get('rx', 0.2)))
+                sv['ry'].set(str(s.get('ry', 0.2)))
+                sv['th'].set(str(s.get('th', 0.01)))
+
+    def _save(self):
+        """从 UI 控件写回 occ_params 字典, 执行回调"""
+        p = self.occ_params
+        p['enable'] = self.var_enable.get()
+        p['seat_type'] = self.var_seat_type.get()
+        try:
+            p['smooth_window'] = int(self.var_smooth.get())
+            p['smooth_threshold'] = float(self.var_smooth_th.get())
+        except ValueError:
+            pass
+
+        key = 'seats_4' if p['seat_type'] == '4_seats' else 'seats_5'
+        num_seats = 4 if p['seat_type'] == '4_seats' else 5
+        seat_list = []
+        for i in range(num_seats):
+            sv = self.seat_vars[i]
+            try:
+                seat_list.append({
+                    'name': sv['name'].get(),
+                    'cx': float(sv['cx'].get()),
+                    'cy': float(sv['cy'].get()),
+                    'rx': float(sv['rx'].get()),
+                    'ry': float(sv['ry'].get()),
+                    'th': float(sv['th'].get()),
+                })
+            except ValueError:
+                continue
+        p[key] = seat_list
+
+        self.callback(p)
+        self.destroy()
+
 
 class ControlPanel(tk.Frame):
     def __init__(self, parent, config, cbs):
@@ -1834,6 +2143,7 @@ class ControlPanel(tk.Frame):
         self.cb_algo.pack(side='left')
         self.cb_algo.bind("<<ComboboxSelected>>", self._on_algo_change)
         tk.Button(row1, text="⚙️ Params", command=self._open_algo).pack(side='right')
+        tk.Button(row1, text="🪑 Seats", command=self._open_seats).pack(side='right', padx=(2, 5))
         
         row2 = tk.Frame(frm_algo, bg='#f0f0f0')
         row2.pack(fill='x', padx=2)
@@ -1996,11 +2306,19 @@ class ControlPanel(tk.Frame):
         self.config.current_algo = self.cb_algo.get()
         self.cbs['update_layout'](self.config.current_algo)
 
-    def _open_algo(self): 
-        AlgoSettingsDialog(self, self.config.current_algo, 
-                           self.config.algo_params.get(self.config.current_algo, {}), 
-                           lambda p: (self.config.algo_params.update({self.config.current_algo: p}), 
+    def _open_algo(self):
+        AlgoSettingsDialog(self, self.config.current_algo,
+                           self.config.algo_params.get(self.config.current_algo, {}),
+                           lambda p: (self.config.algo_params.update({self.config.current_algo: p}),
                                       self.cbs['update_layout'](self.config.current_algo)))
+
+    def _open_seats(self):
+        occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
+        def on_save(new_p):
+            self.config.algo_params['SEAT-OCCUPANCY'] = new_p
+            # 重建检测器 + 刷新当前布局使椭圆立即生效
+            self.cbs['update_layout'](self.config.current_algo)
+        SeatConfigDialog(self, occ_params, on_save)
 
     def _sel_pb(self): 
         # 修改为 askopenfilenames (复数)
@@ -2100,11 +2418,20 @@ class App:
         self.pc_export_data = []  # 新增：用于存储点云导出数据的列表
         self.playback_queue = [] # 新增：存放待处理的文件路径队列
         self.playback_skip_state = False  # False 表示处理，True 表示跳过
+        # 座椅占用检测器
+        occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
+        self.seat_detector = SeatOccupancyDetector(occ_params)
     def update_layout(self, mode):
         # 1. 更新绘图面板的布局
-        self.plot_panel.init_layout(mode, self.config.algo_params.get(mode, {}))
-        
-        # 2. 【核心修复】强制算法处理器重新初始化参数
+        p = self.config.algo_params.get(mode, {})
+        occ_cfg = self.config.algo_params.get('SEAT-OCCUPANCY', {})
+        p['occupancy_config'] = occ_cfg
+        self.plot_panel.init_layout(mode, p)
+
+        # 2. 重建座椅检测器 (使配置修改立即生效)
+        self.seat_detector = SeatOccupancyDetector(occ_cfg)
+
+        # 3. 【核心修复】强制算法处理器重新初始化参数
         # 这样当你修改了虚拟天线索引、频率范围等参数时，后端才会重新计算
         self.algo_processor.init_done = False 
         print(f"参数已更新，算法 {mode} 将重新初始化...")
@@ -2143,9 +2470,11 @@ class App:
         # 2. 重新实例化算法处理器，并关联新的数据管理器
         self.algo_processor = AlgorithmProcessor(self.config, self.data_manager)
         
-        # 3. 重置导出缓存和 UI
+        # 3. 重置导出缓存、UI 和座椅检测器
         self.pc_export_data = []
-        self.plot_panel.pc_history = [] 
+        self.plot_panel.pc_history = []
+        occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
+        self.seat_detector = SeatOccupancyDetector(occ_params)
         # ------------------------------------
         
         print(f"开始处理 ({len(self.playback_queue)} 剩余): {os.path.basename(current_file)}")
@@ -2246,6 +2575,13 @@ class App:
                                 "points": d.get("detected_points", [])
                             }
                             self.pc_export_data.append(export_frame)
+
+                    # 座椅占用检测
+                    if d and self.config.algo_params.get('SEAT-OCCUPANCY', {}).get('enable', True):
+                        occ, f_vals = self.seat_detector.process(
+                            d.get('detected_points', []))
+                        d['occupancy'] = occ
+                        d['f_values'] = f_vals
 
                 if d:
                     self.plot_panel.update_data(m, d)
