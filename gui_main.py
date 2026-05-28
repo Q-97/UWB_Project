@@ -149,6 +149,7 @@ DEFAULT_ALGO_PARAMS = {
         "azi_angle_range": [-70, 70],
         "azimuth_num": 64,
         "dbf_diff": 0,
+        "aoa_calib_mode": "linear",
         "ant_calib_en": False,
         "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "dist_per_tap": 0.1875,
@@ -187,6 +188,7 @@ DEFAULT_ALGO_PARAMS = {
         "fft_n": 16,
         "antenna_spacing": 0.5,
         "music_forward_backward": False,
+        "aoa_calib_mode": "linear",
         "aoa_offset_deg": -12.0,
         "aoa_scale": 1.0,
         "ant_calib_en": False,
@@ -779,21 +781,15 @@ class AlgorithmProcessor:
         else:
             angle = 0.0
 
-        # 2. 仅在 PLAYBACK 模式下应用线性校准
-        if self.config.connection_mode == 'PLAYBACK':
-            # 获取校准参数
+        # 2. 校准 (FFT/MUSIC 仅支持 linear 模式)
+        calib_mode = params.get('aoa_calib_mode', 'linear')
+        if calib_mode in ('linear', 'both'):
             offset_deg = params.get("aoa_offset_deg", 0.0)
             scale = params.get("aoa_scale", 1.0)
-            
-            # 将角度偏移从“度”转换为“弧度”
             offset_rad = np.deg2rad(offset_deg)
-            
-            # 执行线性变换: y = kx + b
             angle = (angle * scale) + offset_rad
-            
-            # 可选：限制角度范围在 [-pi/2, pi/2]
-            angle = np.clip(angle, -np.pi/2, np.pi/2)
-            
+        angle = np.clip(angle, -np.pi/2, np.pi/2)
+
         return angle
     
     def calculate_2d_fft_aoa(self, grid_2d, params):
@@ -1013,7 +1009,7 @@ class AlgorithmProcessor:
             detected_points.append({
             'pos': (point_x, point_y),
             'snr': snr_val,
-            'time': time.time() # 记录时间戳用于“出现后消失”效果
+            'time': time.time() # 记录时间戳用于"出现后消失"效果
             })
 
         # 6. Breathing
@@ -1228,7 +1224,7 @@ class AlgorithmProcessor:
             self._dbf_sv = self._dbf_sv * calib[:, np.newaxis]
 
     def _dbf_estimate(self, phase_vec, params):
-        """DBF 方位角估计，返回弧度"""
+        """DBF 方位角估计，返回弧度（含线性校准）"""
         x = phase_vec.reshape(-1, 1)
         pwr = np.abs(self._dbf_sv.conj().T @ x) ** 2
         pwr = pwr.flatten()
@@ -1249,6 +1245,15 @@ class AlgorithmProcessor:
                 ratio_db = 10 * np.log10(pwr[peak_idx] / side_pwr)
                 if ratio_db < dbf_diff:
                     return 0.0
+
+        # 校准模式选择
+        calib_mode = params.get('aoa_calib_mode', 'linear')
+        if calib_mode in ('linear', 'both'):
+            offset_deg = params.get("aoa_offset_deg", 0.0)
+            scale = params.get("aoa_scale", 1.0)
+            offset_rad = np.deg2rad(offset_deg)
+            az = (az * scale) + offset_rad
+        az = np.clip(az, -np.pi / 2, np.pi / 2)
         return az
 
     def step_point_cloud_dubhe(self):
