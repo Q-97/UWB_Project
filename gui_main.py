@@ -200,6 +200,73 @@ DEFAULT_ALGO_PARAMS = {
         "doppler_tx": 1, "doppler_rx": 6,
     },
 
+    "POINT-CLOUD-PAPER": {
+        # --- Physical ---
+        "center_freq": 7.9872e9,
+        "bandwidth": 100e6,
+        "dist_per_tap": 0.1875,
+        "cir_offset": 8,
+        "snapshots": 64,
+
+        # --- Antenna ---
+        "num_virtual_ant": 8,
+        "antenna_spacing": 0.5,
+        "indices_azimuth": [2, 3, 6, 7],
+        "cfar_only_selected": True,
+
+        # --- Doppler preprocessing ---
+        "doppler_window": "chebyshev",
+        "doppler_win_atten": 60,
+        "doppler_dc_remove": True,
+        "leakage_offset": 5,
+
+        # --- Pass 1: 1D Range CFAR (min(L,R) noise estimator) ---
+        "range_train": 4,
+        "range_guard": 2,
+        "range_threshold_db": 10.0,
+        "range_ave_pad": 3,
+        "doppler_sum_v_min": 1,
+        "doppler_sum_v_max": 20,
+
+        # --- Pass 2: 1D Angle CFAR (min(L,R) noise estimator) ---
+        "angle_train": 3,
+        "angle_guard": 1,
+        "angle_threshold_db": 8.0,
+        "aoa_coarse_n": 36,
+        "aoa_angle_range": [-70, 70],
+
+        # --- AoA method (MUSIC / DBF / FFT) ---
+        "aoa_method": "MUSIC",
+        "fft_n": 16,
+        "music_forward_backward": False,
+
+        # --- Pass 3: Zoom-in refinement ---
+        "zoom_in_factor": 3,
+        "zoom_threshold_gamma": 0.5,
+
+        # --- DBF specific (shared with other modes) ---
+        "ant_dbf_select": [2, 3, 6, 7],
+        "azimuth_num": 64,
+        "dbf_diff": 0,
+        "ant_calib_en": False,
+        "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+
+        # --- Calibration ---
+        "aoa_calib_mode": "linear",
+        "aoa_offset_deg": -12.0,
+        "aoa_scale": 1.0,
+
+        # --- Post-processing ---
+        "point_lifetime_sec": 1.5,
+        "plot_xlim": 1.5,
+        "plot_ylim_min": -2.5,
+        "plot_ylim_max": 0.0,
+
+        # --- Breathing ---
+        "doppler_tx": 1,
+        "doppler_rx": 6,
+    },
+
     "SEAT-OCCUPANCY": {
         "enable": True,
         "seat_type": "4_seats",
@@ -1152,6 +1219,357 @@ class AlgorithmProcessor:
             "breath_val": val_breath,
         }
 
+    # ===== Multipass CFAR (IEEE Sensors Journal 2024) helpers =====
+
+    def perform_1d_cfar_min(self, signal, train, guard, threshold_db, ave_pad=None):
+        """
+        论文 Algorithm 1 的 1D CFAR: min(μ_L, μ_R) 噪声估计器
+
+        参数:
+            signal: 1D numpy array, 输入信号
+            train: N_W, 训练单元半窗大小
+            guard: N_G, 保护单元半窗大小
+            threshold_db: γ, 阈值因子 (dB)
+            ave_pad: N_ave, 边界padding均值点数, 默认等于 train
+
+        返回:
+            mask: bool array, 检出点掩码
+            noise_est: float array, 每个bin的噪声估计
+        """
+        N = len(signal)
+        mask = np.zeros(N, dtype=bool)
+        noise_est = np.zeros(N, dtype=float)
+        if ave_pad is None:
+            ave_pad = train
+
+        threshold_linear = 10 ** (threshold_db / 10.0)
+        wg = train + guard  # 半窗+保护 = 到训练区边缘的距离
+
+        for k in range(N):
+            # 左侧训练单元范围: [k - wg - train, k - wg - 1]
+            lo_L = max(0, k - wg - train)
+            hi_L = max(0, k - wg)
+            # 右侧训练单元范围: [k + wg + 1, k + wg + train]
+            lo_R = min(N, k + wg + 1)
+            hi_R = min(N, k + wg + train + 1)
+
+            left_cells = signal[lo_L:hi_L]
+            right_cells = signal[lo_R:hi_R]
+
+            if len(left_cells) == 0 and len(right_cells) == 0:
+                noise_est[k] = 1e-12
+                continue
+
+            mu_L = np.mean(left_cells) if len(left_cells) > 0 else np.inf
+            mu_R = np.mean(right_cells) if len(right_cells) > 0 else np.inf
+            noise_est[k] = min(mu_L, mu_R)
+
+            if signal[k] > noise_est[k] * threshold_linear:
+                mask[k] = True
+
+        return mask, noise_est
+
+    def _bartlett_spectrum(self, phase_vec, angles_rad):
+        """Bartlett (conventional) beamforming 角度谱 — 用于 Pass 2 粗检测"""
+        N = len(phase_vec)
+        d = 0.5  # 天线间距 (λ)
+        n_idx = np.arange(N)
+        spectrum = np.zeros(len(angles_rad), dtype=float)
+        for i, theta in enumerate(angles_rad):
+            sv = np.exp(1j * 2 * np.pi * d * np.sin(theta) * n_idx)
+            spectrum[i] = np.abs(sv.conj() @ phase_vec) ** 2
+        return spectrum
+
+    def _compute_angle_response(self, phase_vec, params, angles_rad):
+        """
+        统一角度响应计算: 根据 aoa_method 分发到 FFT / DBF / MUSIC
+
+        返回: 1D array, 每个 angle_rad 对应的响应功率/谱值
+        """
+        method = params.get('aoa_method', 'MUSIC')
+        if method == 'FFT':
+            return self._fft_angle_response(phase_vec, params, angles_rad)
+        elif method == 'DBF':
+            return self._dbf_angle_response(phase_vec, angles_rad)
+        else:  # MUSIC
+            return self._music_angle_response(phase_vec, params, angles_rad)
+
+    def _fft_angle_response(self, phase_vec, params, angles_rad):
+        """FFT-based 角度响应: Bartlett BF in fine angular grid"""
+        return self._bartlett_spectrum(phase_vec, angles_rad)
+
+    def _dbf_angle_response(self, phase_vec, angles_rad):
+        """DBF 角度响应: 使用预计算的引导矢量"""
+        if getattr(self, '_dbf_sv_cache', None) is None:
+            return self._bartlett_spectrum(phase_vec, angles_rad)
+
+        # 寻找 angles_rad 中最接近预计算角度的索引
+        x = phase_vec.reshape(-1, 1)
+        pwr = np.abs(self._dbf_sv_cache.conj().T @ x) ** 2
+        pwr = pwr.flatten()
+
+        # 插值到请求的角度
+        response = np.interp(angles_rad, self._dbf_angles_cache, pwr,
+                             left=pwr[0], right=pwr[-1])
+        return response
+
+    def _music_angle_response(self, phase_vec, params, angles_rad):
+        """MUSIC 角度响应: 伪谱值"""
+        N = len(phase_vec)
+        d = params.get('antenna_spacing', 0.5)
+        # 构建协方差矩阵 (单快照 → 前后向平滑)
+        x = phase_vec.reshape(-1, 1)
+        R = x @ x.conj().T
+        if params.get('music_forward_backward', False):
+            J = np.flip(np.eye(N), axis=0)
+            R = 0.5 * (R + J @ R.conj() @ J)
+
+        # 特征分解
+        evals, evecs = np.linalg.eigh(R)
+        noise_subspace = evecs[:, :-1]  # 假设单目标
+
+        n_indices = np.arange(N)
+        pseudo = np.zeros(len(angles_rad), dtype=float)
+        for i, theta in enumerate(angles_rad):
+            sv = np.exp(1j * 2 * np.pi * d * np.sin(theta) * n_indices)
+            v = sv.reshape(-1, 1)
+            denom = v.conj().T @ noise_subspace @ noise_subspace.conj().T @ v
+            pseudo[i] = 1.0 / (np.abs(denom[0, 0]) + 1e-12)
+        return pseudo
+
+    def _zoom_in_aoa(self, phase_vec, params, coarse_angle_rad, coarse_power):
+        """
+        Pass 3: Zoom-in 角度细化 + 动态对比度阈值
+
+        论文 Algorithm 2: 在粗检测角度周围做高分辨率扫描,
+        用动态阈值 γ_th = H_coarse * (γ - (Gmax-Gmin)/(Gmax+Gmin)) 进行检测
+
+        返回: [(refined_angle_rad, snr), ...] 检出点列表
+        """
+        zoom_factor = params.get('zoom_in_factor', 3)
+        gamma = params.get('zoom_threshold_gamma', 0.5)
+        coarse_n = params.get('aoa_coarse_n', 36)
+        angle_range = params.get('aoa_angle_range', [-70, 70])
+
+        # 角度步长 = 粗扫描范围 / 粗扫描点数
+        coarse_step = (angle_range[1] - angle_range[0]) / (coarse_n - 1) if coarse_n > 1 else 1.0
+        zoom_step = coarse_step / zoom_factor
+
+        # Zoom-in 角度范围: coarse_angle ± coarse_step
+        half_span = coarse_step * 1.1  # 略大于粗步长, 确保覆盖
+        zoom_angles = np.arange(coarse_angle_rad - half_span,
+                                coarse_angle_rad + half_span + zoom_step * 0.5,
+                                zoom_step)
+        zoom_angles = np.deg2rad(np.rad2deg(zoom_angles))  # normalize
+
+        if len(zoom_angles) < 3:
+            return [(coarse_angle_rad, 0.0)]
+
+        # 计算 Zoom-in 角度响应
+        zoom_response = self._compute_angle_response(phase_vec, params, zoom_angles)
+
+        G_max = np.max(zoom_response)
+        G_min = np.min(zoom_response)
+        if G_max + G_min < 1e-12:
+            return [(coarse_angle_rad, 0.0)]
+
+        # 动态阈值
+        contrast = (G_max - G_min) / (G_max + G_min)
+        gamma_th = coarse_power * (gamma - contrast)
+        if gamma_th <= 0:
+            gamma_th = coarse_power * gamma * 0.5
+
+        # 检测所有高于动态阈值的 zoom-in 角度
+        detections = []
+        for u, theta in enumerate(zoom_angles):
+            if zoom_response[u] > gamma_th:
+                snr = 10 * np.log10(zoom_response[u] / (G_min + 1e-12))
+                detections.append((theta, snr))
+
+        if not detections:
+            # fallback: 取 zoom 响应最大值
+            best_u = np.argmax(zoom_response)
+            snr = 10 * np.log10(zoom_response[best_u] / (G_min + 1e-12))
+            detections.append((zoom_angles[best_u], snr))
+
+        return detections
+
+    def step_point_cloud_paper(self):
+        """
+        论文 Multipass CFAR 点云算法 (IEEE Sensors Journal 2024):
+
+        Pass 1: 1D Range CFAR — min(L,R) 噪声估计, 沿 Range 维度
+        Pass 2: 1D Angle CFAR — min(L,R) 噪声估计, 沿 Angle 维度 (仅对检出 Range)
+        Pass 3: Zoom-in 角度细化 — 动态对比度阈值
+
+        AoA 方法: MUSIC / DBF / FFT (仅影响角度响应计算)
+        俯仰角: 不考虑
+        """
+        # 1. 获取数据
+        all_c = self.dm.get_all_snapshot_as_array('complex')
+        all_a = self.dm.get_all_snapshot_as_array('abs')
+        if all_c is None:
+            return None
+
+        params = self.config.algo_params['POINT-CLOUD-PAPER']
+        N_snaps = params['snapshots']
+        leakage_offset = params.get('leakage_offset', 5)
+        current_cube = all_c[:, :, :, -N_snaps:]
+
+        # 2. Leakage roll + DC removal + window
+        current_cube = np.roll(current_cube, -leakage_offset, axis=2)
+        if params.get('doppler_dc_remove', True):
+            current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
+        if params.get('doppler_window') == 'chebyshev':
+            atten = params.get('doppler_win_atten', 60)
+            win = chebwin(current_cube.shape[3], at=atten)
+            current_cube = current_cube * win[np.newaxis, np.newaxis, np.newaxis, :]
+
+        # 3. Doppler FFT
+        rd_cube = np.fft.fft(current_cube, axis=3)
+
+        # 4. 展平 + 选通道 + 非相干合并
+        rd_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
+            8, rd_cube.shape[2], rd_cube.shape[3])
+        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
+        if params.get('cfar_only_selected', True):
+            rd_sel = rd_flat[valid_indices, :, :]
+        else:
+            rd_sel = rd_flat
+        power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)  # (Range, Doppler)
+        n_range, n_dop = power_map.shape
+
+        # 5. 沿 Doppler 累加 (仅累加感兴趣的速度区间) → 1D Range 功率曲线
+        v_min = params.get('doppler_sum_v_min', 1)
+        v_max = params.get('doppler_sum_v_max', 20)
+        vel_mask = np.zeros(n_dop, dtype=bool)
+        vel_mask[v_min:v_max] = True
+        vel_mask[n_dop - v_max:n_dop - v_min] = True
+        range_profile = np.sum(power_map[:, vel_mask], axis=1)
+
+        # ==================== Pass 1: 1D Range CFAR ====================
+        range_mask, range_noise = self.perform_1d_cfar_min(
+            range_profile,
+            train=params['range_train'],
+            guard=params['range_guard'],
+            threshold_db=params['range_threshold_db'],
+            ave_pad=params.get('range_ave_pad', 3)
+        )
+        detected_ranges = np.argwhere(range_mask).flatten()
+
+        if len(detected_ranges) == 0:
+            return {
+                "detected_points": [],
+                "params": params,
+                "breath_val": 0.0,
+            }
+
+        # ==================== 准备角度扫描 ====================
+        # 粗角度网格
+        coarse_n = params.get('aoa_coarse_n', 36)
+        angle_deg_range = params.get('aoa_angle_range', [-70, 70])
+        coarse_angles_deg = np.linspace(angle_deg_range[0], angle_deg_range[1], coarse_n)
+        coarse_angles_rad = np.deg2rad(coarse_angles_deg)
+
+        # 预初始化 DBF (如果需要)
+        aoa_method = params.get('aoa_method', 'MUSIC')
+        if aoa_method == 'DBF':
+            if getattr(self, '_dbf_sv_cache', None) is None:
+                # 用 coarse angles 初始化
+                wavelength = 2.99792458e8 / params['center_freq']
+                channels = params.get('ant_dbf_select', valid_indices)
+                all_virt_x = np.array([-0.038, 0.0, -0.038, -0.019, 0.0, 0.038, 0.0, 0.019])
+                ant_x = all_virt_x[channels] / wavelength
+                self._dbf_angles_cache = np.linspace(
+                    np.deg2rad(angle_deg_range[0]),
+                    np.deg2rad(angle_deg_range[1]),
+                    params.get('azimuth_num', 64)
+                )
+                self._dbf_sv_cache = np.exp(
+                    -1j * 2 * np.pi *
+                    ant_x[:, np.newaxis] * np.sin(self._dbf_angles_cache[np.newaxis, :])
+                )
+
+        # ==================== Pass 2 & 3: Per detected Range ====================
+        detected_points = []
+        cir_offset = params.get('cir_offset', 8)
+
+        for r_idx in detected_ranges:
+            # 6a. 取该 Range 最强的 Doppler bin 的相位向量
+            d_idx = np.argmax(power_map[r_idx, :])
+            phase_vec_full = rd_flat[:, r_idx, d_idx]
+            phase_vec_sel = phase_vec_full[valid_indices]
+
+            # 6b. 计算粗角度响应谱
+            angle_response = self._compute_angle_response(
+                phase_vec_sel, params, coarse_angles_rad)
+
+            # ==================== Pass 2: 1D Angle CFAR ====================
+            angle_mask, angle_noise = self.perform_1d_cfar_min(
+                angle_response,
+                train=params['angle_train'],
+                guard=params['angle_guard'],
+                threshold_db=params['angle_threshold_db']
+            )
+            detected_angle_indices = np.argwhere(angle_mask).flatten()
+
+            for a_idx in detected_angle_indices:
+                coarse_angle = coarse_angles_rad[a_idx]
+                coarse_power = angle_response[a_idx]
+
+                # ================= Pass 3: Zoom-in =================
+                zoom_detections = self._zoom_in_aoa(
+                    phase_vec_sel, params, coarse_angle, coarse_power)
+
+                # 校准 (linear)
+                calib_mode = params.get('aoa_calib_mode', 'linear')
+                offset_deg = params.get('aoa_offset_deg', 0.0)
+                scale = params.get('aoa_scale', 1.0)
+                offset_rad = np.deg2rad(offset_deg)
+
+                for az_angle, snr_val in zoom_detections:
+                    # 校准
+                    if calib_mode in ('linear', 'both'):
+                        az_angle = (az_angle * scale) + offset_rad
+                    az_angle = np.clip(az_angle, -np.pi / 2, np.pi / 2)
+
+                    # 坐标转换
+                    dist = (r_idx + cir_offset - 6) * params['dist_per_tap']
+                    point_x = dist * np.sin(az_angle)
+                    point_y = -dist * np.cos(az_angle)
+
+                    detected_points.append({
+                        'pos': (point_x, point_y),
+                        'snr': snr_val,
+                        'time': time.time()
+                    })
+
+        # ==================== Breathing ====================
+        dop_fft_n = params['snapshots']
+        val_breath = 0.0
+        try:
+            if all_a.shape[3] >= dop_fft_n:
+                dop_tx = params['doppler_tx']
+                dop_rx = params['doppler_rx']
+                tx_idx = self.config.udp_tx_list.index(dop_tx)
+                rx_idx = self.config.udp_rx_list.index(dop_rx)
+                recent_a = all_a[rx_idx, tx_idx, :, -dop_fft_n:]
+                val_breath, _, _, max_motion = find_breathing_feature(
+                    np.fft.fft(recent_a, axis=1),
+                    self.config.snapshot_rate, 0.15, 0.7, 0, 16)
+                if self.breathing_window.maxlen != 10:
+                    self.breathing_window = deque(list(self.breathing_window), maxlen=10)
+                self.breathing_window.append(val_breath)
+        except:
+            pass
+        val_breath = float(val_breath)
+
+        return {
+            "detected_points": detected_points,
+            "params": params,
+            "breath_val": val_breath,
+        }
+
     def map_to_2d_grid(self, raw_vec):
         """
         将原始 8 通道数据映射到 2x5 虚拟面阵网格
@@ -1753,7 +2171,7 @@ class PlotPanel(tk.Frame):
                 ax3.add_patch(plt.Rectangle((-0.65, -1.8), 1.3, 1.8, ec='blue', fc='none', lw=2))
             else: ax3.set_rmax(3.5); ax3.set_theta_zero_location('S')
             self.axes = {'music': ax1, 'dop': ax2, 'fus': ax3}
-        elif mode in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE'):
+        elif mode in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER'):
             ax = self.figure.add_subplot(111)
             ax.set_xlim(-params.get('plot_xlim', 1.5), params.get('plot_xlim', 1.5))
             ax.set_ylim(params.get('plot_ylim_min', -2.5), params.get('plot_ylim_max', 0))
@@ -1761,6 +2179,7 @@ class PlotPanel(tk.Frame):
                 'POINT-CLOUD': "Vehicle Occupancy Point Cloud (CA-CFAR)",
                 'POINT-CLOUD-OPTIMIZED': "Vehicle Occupancy Point Cloud (Optimized)",
                 'POINT-CLOUD-DUBHE': "Vehicle Occupancy Point Cloud (Dubhe CPD)",
+                'POINT-CLOUD-PAPER': "Vehicle Occupancy Point Cloud (Multipass CFAR, IEEE JSEN'24)",
             }
             ax.set_title(mode_titles.get(mode, "Point Cloud"))
             ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
@@ -1830,7 +2249,7 @@ class PlotPanel(tk.Frame):
                 else: self.plots['tgt'].set_data([tx], [ty])
             else: self.plots['tgt'].set_data([], [])
             self.axes['fus'].set_title(f"Breath: {data['breath_val']:.2f} | Motion: {data['max_motion']:.2f}")
-        elif mode in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE'):
+        elif mode in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER'):
             if not data or 'detected_points' not in data: return
             p = data['params']
             breath_val = data.get('breath_val', 0.0)
@@ -1838,6 +2257,7 @@ class PlotPanel(tk.Frame):
                 'POINT-CLOUD': "Vehicle Occupancy Point Cloud (CA-CFAR)",
                 'POINT-CLOUD-OPTIMIZED': "Vehicle Occupancy Point Cloud (Optimized)",
                 'POINT-CLOUD-DUBHE': "Vehicle Occupancy Point Cloud (Dubhe CPD)",
+                'POINT-CLOUD-PAPER': "Vehicle Occupancy Point Cloud (Multipass CFAR, IEEE JSEN'24)",
             }
             base_title = mode_titles.get(mode, "Point Cloud")
             info_text = f"Breath: {breath_val:.3f}"
@@ -2143,7 +2563,7 @@ class ControlPanel(tk.Frame):
         row1 = tk.Frame(frm_algo, bg='#f0f0f0')
         row1.pack(fill='x', padx=2)
         tk.Label(row1, text="Algo:", bg='#f0f0f0').pack(side='left')
-        self.cb_algo = ttk.Combobox(row1, values=('PLOT', '2D-MUSIC', 'POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE'), width=18, state='readonly')
+        self.cb_algo = ttk.Combobox(row1, values=('PLOT', '2D-MUSIC', 'POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER'), width=22, state='readonly')
         self.cb_algo.set(config.current_algo)
         self.cb_algo.pack(side='left')
         self.cb_algo.bind("<<ComboboxSelected>>", self._on_algo_change)
@@ -2562,11 +2982,13 @@ class App:
                     d = self.algo_processor.step_waveform()
                 elif m == '2D-MUSIC':
                     d = self.algo_processor.step_2d_music()
-                elif m in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE'):
+                elif m in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER'):
                     if m == 'POINT-CLOUD':
                         d = self.algo_processor.step_point_cloud()
                     elif m == 'POINT-CLOUD-OPTIMIZED':
                         d = self.algo_processor.step_point_cloud_optimized()
+                    elif m == 'POINT-CLOUD-PAPER':
+                        d = self.algo_processor.step_point_cloud_paper()
                     else:
                         d = self.algo_processor.step_point_cloud_dubhe()
 
