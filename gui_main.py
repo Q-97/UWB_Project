@@ -33,7 +33,74 @@ plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 # ==============================================================================
-# 0. Presets & Defaults
+# 0. Config Persistence
+# ==============================================================================
+class NpEncoder(json.JSONEncoder):
+    """处理 numpy 类型的 JSON 序列化"""
+    def default(self, obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config_save.json')
+
+_SAVE_FIELDS = [
+    'ft_len', 'max_snapshots', 'udp_tx_list', 'udp_rx_list', 'bg_m_factor',
+    'num_tx_antennas', 'num_rx_antennas', 'rx_antenna_start_num',
+    'connection_mode', 'serial_port', 'baud_rate', 'udp_ip', 'udp_port',
+    'current_layout_name', 'current_algo', 'snapshot_rate', 'tap_interval_si',
+    'data_save_dir', 'record_filename', 'record_duration',
+    'playback_duration', 'export_pc_json',
+]
+
+def save_config(config):
+    """将当前配置持久化到 JSON 文件"""
+    try:
+        data = {
+            "version": 1,
+            "radar_config": {k: getattr(config, k) for k in _SAVE_FIELDS if hasattr(config, k)},
+            "algo_params": config.algo_params,
+        }
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, cls=NpEncoder, ensure_ascii=False)
+    except Exception as e:
+        print(f"[Config] 保存配置失败: {e}")
+
+def load_config(config):
+    """从 JSON 文件加载配置, 覆盖默认值. 返回 True 表示加载成功."""
+    if not os.path.exists(CONFIG_FILE):
+        return False
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        # 顶层配置: 只覆盖 JSON 中存在的 key
+        rc = data.get("radar_config", {})
+        for key, val in rc.items():
+            if hasattr(config, key):
+                setattr(config, key, val)
+        # 算法参数: 浅合并, 保留代码默认值中的新 key
+        saved_params = data.get("algo_params", {})
+        for algo_name, params in saved_params.items():
+            if algo_name in config.algo_params:
+                config.algo_params[algo_name].update(params)
+            else:
+                config.algo_params[algo_name] = params
+        # 确保天线布局与 current_layout_name 一致
+        config.load_layout(config.current_layout_name)
+        print(f"[Config] 配置已从 {CONFIG_FILE} 加载")
+        return True
+    except Exception as e:
+        print(f"[Config] 加载配置失败: {e}")
+        return False
+
+# ==============================================================================
+# 1. Presets & Defaults
 # ==============================================================================
 ANTENNA_LAYOUTS = {
     "2x4_Default": {
@@ -100,6 +167,7 @@ DEFAULT_ALGO_PARAMS = {
         "snapshots": 64,            # 论文规定：每帧包含 32 个 Chirp
         "cfar_threshold_db": 10.0,  # 论文规定：检测阈值系数为 15 dB
         "music_forward_backward": True,  # <--- 新增：默认为 False
+        "capon_diag_load": 1e-3,       # Capon 对角加载因子
         # 论文中 CA-CFAR 的窗口设置
         "range_train": 3,           
         "range_guard": 1,           
@@ -145,6 +213,7 @@ DEFAULT_ALGO_PARAMS = {
         "fft_n": 16, "antenna_spacing": 0.5,
         "indices_azimuth": [2, 3, 6, 7],
         "music_forward_backward": False,
+        "capon_diag_load": 1e-3,
         "ant_dbf_select": [2, 3, 6, 7],
         "azi_angle_range": [-70, 70],
         "azimuth_num": 64,
@@ -188,6 +257,7 @@ DEFAULT_ALGO_PARAMS = {
         "fft_n": 16,
         "antenna_spacing": 0.5,
         "music_forward_backward": False,
+        "capon_diag_load": 1e-3,
         "aoa_calib_mode": "linear",
         "aoa_offset_deg": -12.0,
         "aoa_scale": 1.0,
@@ -237,6 +307,7 @@ DEFAULT_ALGO_PARAMS = {
         "aoa_method": "MUSIC",
         "fft_n": 16,
         "music_forward_backward": False,
+        "capon_diag_load": 1e-3,
 
         # --- Pass 3: Zoom-in refinement ---
         "zoom_in_factor": 3,
@@ -283,13 +354,14 @@ DEFAULT_ALGO_PARAMS = {
         ],
         "smooth_window": 3,
         "smooth_threshold": 0.5,
+        "hold_time_sec": 2.0,
     },
 
 
 }
 
 # ==============================================================================
-# 1. Protocol & Config
+# 2. Protocol & Config
 # ==============================================================================
 class RadarProtocol:
     START_SIGN = b'\xff\x00\xff\x00'; STOP_SIGN = b'\xf0\x00\xf0\x00'
@@ -379,7 +451,7 @@ class RadarConfig:
     def RX_POS_NP(self): return np.array(self.rx_positions)
 
 # ==============================================================================
-# 2. Data Manager
+# 3. Data Manager
 # ==============================================================================
 class FixedBuffer:
     def __init__(self, maxlen): self.buffer = deque(maxlen=maxlen); self._maxlen = maxlen
@@ -494,7 +566,7 @@ class RadarDataManager:
         return arr
 
 # ==============================================================================
-# 3. Algorithm Processor (Logic Ported + Vectorized)
+# 4. Algorithm Processor (Logic Ported + Vectorized)
 # ==============================================================================
 def calculate_mdl_asc_local(k, eigvals_asc, M, L):
     """ 本地 MDL 计算函数，防止 util.py 缺失 """
@@ -843,6 +915,8 @@ class AlgorithmProcessor:
             angle = -self.calculate_fft_aoa(phase_vec, params)
         elif method == "MUSIC":
             angle = -self.calculate_music_aoa(phase_vec, params)
+        elif method == "Capon":
+            angle = -self.calculate_capon_aoa(phase_vec, params)
         else:
             angle = 0.0
 
@@ -1011,6 +1085,42 @@ class AlgorithmProcessor:
             pseudo_spectrum.append(1.0 / np.abs(denom[0, 0]))
         # print("angles ",angles[np.argmax(pseudo_spectrum)])
         return angles[np.argmax(pseudo_spectrum)]
+
+    def calculate_capon_aoa(self, phase_vec, params):
+        """
+        Capon (MVDR) 自适应波束形成测角, 论文 Eq.11-13.
+        对协方差矩阵求逆, 自适应抑制旁瓣, 分辨率优于 DBF/FFT.
+        """
+        N = len(phase_vec)
+        d = params.get("antenna_spacing", 0.5)
+        diag_load = params.get("capon_diag_load", 1e-3)
+
+        # 协方差矩阵 (单快照)
+        x = phase_vec.reshape(-1, 1)
+        R = x @ x.conj().T
+
+        # 前后向平滑
+        if params.get("music_forward_backward", False):
+            J = np.flip(np.eye(N), axis=0)
+            R = 0.5 * (R + J @ R.conj() @ J)
+
+        # 对角加载保证可逆
+        R += np.eye(N) * diag_load * np.abs(np.trace(R))
+
+        try:
+            R_inv = np.linalg.inv(R)
+        except np.linalg.LinAlgError:
+            return 0.0
+
+        # 角度扫描
+        angles = np.linspace(-np.pi / 2, np.pi / 2, 180)
+        n_indices = np.arange(N)
+        spectrum = np.zeros(len(angles))
+        for i, theta in enumerate(angles):
+            sv = np.exp(1j * 2 * np.pi * d * np.sin(theta) * n_indices).reshape(-1, 1)
+            spectrum[i] = 1.0 / np.real(sv.conj().T @ R_inv @ sv)
+
+        return angles[np.argmax(spectrum)]
 
     def step_point_cloud(self):
         """
@@ -1289,6 +1399,8 @@ class AlgorithmProcessor:
             return self._fft_angle_response(phase_vec, params, angles_rad)
         elif method == 'DBF':
             return self._dbf_angle_response(phase_vec, angles_rad)
+        elif method == 'Capon':
+            return self._capon_angle_response(phase_vec, params, angles_rad)
         else:  # MUSIC
             return self._music_angle_response(phase_vec, params, angles_rad)
 
@@ -1334,6 +1446,34 @@ class AlgorithmProcessor:
             denom = v.conj().T @ noise_subspace @ noise_subspace.conj().T @ v
             pseudo[i] = 1.0 / (np.abs(denom[0, 0]) + 1e-12)
         return pseudo
+
+    def _capon_angle_response(self, phase_vec, params, angles_rad):
+        """Capon (MVDR) 角度响应谱, 用于 multipass CFAR 的 Pass 2/3"""
+        N = len(phase_vec)
+        d = params.get('antenna_spacing', 0.5)
+        diag_load = params.get("capon_diag_load", 1e-3)
+
+        x = phase_vec.reshape(-1, 1)
+        R = x @ x.conj().T
+
+        if params.get('music_forward_backward', False):
+            J = np.flip(np.eye(N), axis=0)
+            R = 0.5 * (R + J @ R.conj() @ J)
+
+        R += np.eye(N) * diag_load * np.abs(np.trace(R))
+
+        try:
+            R_inv = np.linalg.inv(R)
+        except np.linalg.LinAlgError:
+            return np.zeros(len(angles_rad))
+
+        n_indices = np.arange(N)
+        response = np.zeros(len(angles_rad))
+        for i, theta in enumerate(angles_rad):
+            sv = np.exp(1j * 2 * np.pi * d * np.sin(theta) * n_indices).reshape(-1, 1)
+            response[i] = 1.0 / np.real(sv.conj().T @ R_inv @ sv)
+
+        return response
 
     def step_point_cloud_paper(self):
         """
@@ -1845,7 +1985,7 @@ class AlgorithmProcessor:
 
 
 # ==============================================================================
-# 3.5 Seat Occupancy Detector (论文: Vehicle Occupancy Detector Based on
+# 4.5 Seat Occupancy Detector (论文: Vehicle Occupancy Detector Based on
 #     FMCW mm-Wave Radar at 77 GHz, Section IV)
 # ==============================================================================
 class SeatOccupancyDetector:
@@ -1863,6 +2003,8 @@ class SeatOccupancyDetector:
         self.occupancy = {s['name']: 0 for s in self.seats}
         # 最近一次的 f_k 值, 用于调试/显示
         self.f_values = {s['name']: 0.0 for s in self.seats}
+        # 占用状态保持: 记录每个座椅的 hold 截止时间戳
+        self.hold_until = {s['name']: 0.0 for s in self.seats}
 
     def _load_seats(self):
         seat_type = self.params.get('seat_type', '4_seats')
@@ -1929,12 +2071,19 @@ class SeatOccupancyDetector:
         return dict(self.occupancy), dict(self.f_values)
 
     def _smooth(self):
-        """公式 (16): 滑动平均 + 阈值 m=0.5"""
+        """公式 (16): 滑动平均 + 阈值 m=0.5, 含占用保持 (hold_time_sec)"""
         m = self.params.get('smooth_threshold', 0.5)
+        hold_t = self.params.get('hold_time_sec', 0.0)
+        now = time.time()
         for name, hist in self.state_history.items():
             if len(hist) > 0:
                 avg = sum(hist) / len(hist)
                 self.occupancy[name] = 1 if avg > m else 0
+            # 占用保持: 一旦检出有人, 在 hold_time_sec 内强制保持占用状态
+            if self.occupancy[name] == 1:
+                self.hold_until[name] = now + hold_t
+            elif hold_t > 0 and now < self.hold_until[name]:
+                self.occupancy[name] = 1
 
     def get_seat_ellipses(self):
         """供 PlotPanel 绘图使用, 返回椭圆参数列表"""
@@ -1944,7 +2093,7 @@ class SeatOccupancyDetector:
 
 
 # ==============================================================================
-# 4. IO Layer
+# 5. IO Layer
 # ==============================================================================
 class LiveRadarSource:
     def __init__(self, config: RadarConfig):
@@ -2074,7 +2223,7 @@ class FilePlaybackSource:
     def get_progress(self): return self.progress
 
 # ==============================================================================
-# 5. UI
+# 6. UI
 # ==============================================================================
 class AlgoSettingsDialog(tk.Toplevel):
     def __init__(self, parent, algo_name, params_dict, callback):
@@ -2399,7 +2548,7 @@ class PlotPanel(tk.Frame):
                     self._seat_texts[name].set_color('green')
 
 # ==============================================================================
-# 3.6 座椅配置对话框
+# 6.6 座椅配置对话框
 # ==============================================================================
 class SeatConfigDialog(tk.Toplevel):
     """座椅占用检测参数配置面板，每座椅独立调节"""
@@ -2435,6 +2584,10 @@ class SeatConfigDialog(tk.Toplevel):
         tk.Label(top, text="平滑阈值:").grid(row=0, column=5, padx=(10, 5))
         self.var_smooth_th = tk.StringVar(value='0.5')
         tk.Spinbox(top, textvariable=self.var_smooth_th, from_=0.1, to=1.0, increment=0.1, width=4).grid(row=0, column=6)
+
+        tk.Label(top, text="保持时长(s):").grid(row=0, column=7, padx=(10, 5))
+        self.var_hold = tk.StringVar(value='2.0')
+        tk.Spinbox(top, textvariable=self.var_hold, from_=0.0, to=30.0, increment=0.5, width=5).grid(row=0, column=8)
 
         # 座椅参数卡片 (4 或 5 个)
         seat_frame = tk.LabelFrame(self, text="座椅椭圆参数 (cx/cy=中心坐标, rx/ry=半轴, TH=检测阈值)", padx=10, pady=5)
@@ -2501,6 +2654,7 @@ class SeatConfigDialog(tk.Toplevel):
         self.var_seat_type.set(p.get('seat_type', '4_seats'))
         self.var_smooth.set(str(p.get('smooth_window', 3)))
         self.var_smooth_th.set(str(p.get('smooth_threshold', 0.5)))
+        self.var_hold.set(str(p.get('hold_time_sec', 2.0)))
 
         key = 'seats_4' if self.var_seat_type.get() == '4_seats' else 'seats_5'
         seats = p.get(key, p.get('seats_4', []))
@@ -2522,6 +2676,7 @@ class SeatConfigDialog(tk.Toplevel):
         try:
             p['smooth_window'] = int(self.var_smooth.get())
             p['smooth_threshold'] = float(self.var_smooth_th.get())
+            p['hold_time_sec'] = float(self.var_hold.get())
         except ValueError:
             pass
 
@@ -2754,12 +2909,14 @@ class ControlPanel(tk.Frame):
         AlgoSettingsDialog(self, self.config.current_algo,
                            self.config.algo_params.get(self.config.current_algo, {}),
                            lambda p: (self.config.algo_params.update({self.config.current_algo: p}),
+                                      save_config(self.config),
                                       self.cbs['update_layout'](self.config.current_algo)))
 
     def _open_seats(self):
         occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
         def on_save(new_p):
             self.config.algo_params['SEAT-OCCUPANCY'] = new_p
+            save_config(self.config)
             # 重建检测器 + 刷新当前布局使椭圆立即生效
             self.cbs['update_layout'](self.config.current_algo)
         SeatConfigDialog(self, occ_params, on_save)
@@ -2851,6 +3008,7 @@ class ControlPanel(tk.Frame):
 class App:
     def __init__(self, root):
         self.root = root; self.root.geometry("1300x850"); self.config = RadarConfig(); self.config.load_layout("2x4_Default")
+        load_config(self.config)  # 持久化: 用已保存的配置覆盖默认值
         if not os.path.exists(self.config.data_save_dir): os.makedirs(self.config.data_save_dir)
         self.data_manager = RadarDataManager(self.config); self.algo_processor = AlgorithmProcessor(self.config, self.data_manager)
         self.source = None; self.running = False
@@ -2931,8 +3089,9 @@ class App:
             return
             
         self.algo_processor.init_done = False; self.running = True; self.loop()
-    def stop(self): 
-        self.running = False; 
+    def stop(self):
+        save_config(self.config)  # 持久化: 退出前保存配置
+        self.running = False;
         # --- 新增：保存 JSON 文件逻辑 ---
         if self.config.connection_mode == 'PLAYBACK' and self.config.export_pc_json:
             if self.pc_export_data:
@@ -3063,4 +3222,4 @@ class App:
         self.root.after(20, self.loop)
 
 if __name__ == '__main__':
-    root = tk.Tk(); app = App(root); root.protocol("WM_DELETE_WINDOW", lambda: app.stop() or root.destroy()); root.mainloop()
+    root = tk.Tk(); app = App(root); root.protocol("WM_DELETE_WINDOW", lambda: (save_config(app.config), app.stop(), root.destroy())); root.mainloop()
