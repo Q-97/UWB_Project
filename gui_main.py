@@ -228,9 +228,7 @@ DEFAULT_ALGO_PARAMS = {
         "doppler_sum_v_min": 1,
         "doppler_sum_v_max": 20,
 
-        # --- Pass 2: 1D Angle CFAR (min(L,R) noise estimator) ---
-        "angle_train": 3,
-        "angle_guard": 1,
+        # --- Pass 2: Angle quality check (替代 1D Angle CFAR) ---
         "angle_threshold_db": 8.0,
         "aoa_coarse_n": 36,
         "aoa_angle_range": [-70, 70],
@@ -1337,72 +1335,17 @@ class AlgorithmProcessor:
             pseudo[i] = 1.0 / (np.abs(denom[0, 0]) + 1e-12)
         return pseudo
 
-    def _zoom_in_aoa(self, phase_vec, params, coarse_angle_rad, coarse_power):
-        """
-        Pass 3: Zoom-in 角度细化 + 动态对比度阈值
-
-        论文 Algorithm 2: 在粗检测角度周围做高分辨率扫描,
-        用动态阈值 γ_th = H_coarse * (γ - (Gmax-Gmin)/(Gmax+Gmin)) 进行检测
-
-        返回: [(refined_angle_rad, snr), ...] 检出点列表
-        """
-        zoom_factor = params.get('zoom_in_factor', 3)
-        gamma = params.get('zoom_threshold_gamma', 0.5)
-        coarse_n = params.get('aoa_coarse_n', 36)
-        angle_range = params.get('aoa_angle_range', [-70, 70])
-
-        # 角度步长 = 粗扫描范围 / 粗扫描点数
-        coarse_step = (angle_range[1] - angle_range[0]) / (coarse_n - 1) if coarse_n > 1 else 1.0
-        zoom_step = coarse_step / zoom_factor
-
-        # Zoom-in 角度范围: coarse_angle ± coarse_step
-        half_span = coarse_step * 1.1  # 略大于粗步长, 确保覆盖
-        zoom_angles = np.arange(coarse_angle_rad - half_span,
-                                coarse_angle_rad + half_span + zoom_step * 0.5,
-                                zoom_step)
-        zoom_angles = np.deg2rad(np.rad2deg(zoom_angles))  # normalize
-
-        if len(zoom_angles) < 3:
-            return [(coarse_angle_rad, 0.0)]
-
-        # 计算 Zoom-in 角度响应
-        zoom_response = self._compute_angle_response(phase_vec, params, zoom_angles)
-
-        G_max = np.max(zoom_response)
-        G_min = np.min(zoom_response)
-        if G_max + G_min < 1e-12:
-            return [(coarse_angle_rad, 0.0)]
-
-        # 动态阈值
-        contrast = (G_max - G_min) / (G_max + G_min)
-        gamma_th = coarse_power * (gamma - contrast)
-        if gamma_th <= 0:
-            gamma_th = coarse_power * gamma * 0.5
-
-        # 检测所有高于动态阈值的 zoom-in 角度
-        detections = []
-        for u, theta in enumerate(zoom_angles):
-            if zoom_response[u] > gamma_th:
-                snr = 10 * np.log10(zoom_response[u] / (G_min + 1e-12))
-                detections.append((theta, snr))
-
-        if not detections:
-            # fallback: 取 zoom 响应最大值
-            best_u = np.argmax(zoom_response)
-            snr = 10 * np.log10(zoom_response[best_u] / (G_min + 1e-12))
-            detections.append((zoom_angles[best_u], snr))
-
-        return detections
-
     def step_point_cloud_paper(self):
         """
-        论文 Multipass CFAR 点云算法 (IEEE Sensors Journal 2024):
+        论文 Multipass CFAR 点云算法 (IEEE Sensors Journal 2024),
+        适配 IR-UWB: NVE 底噪归一化 + min(L,R) 1D CFAR + Zoom-in
 
+        Pass 0: NVE → SNR_map (线性), 消除 range 维度底噪起伏
         Pass 1: 1D Range CFAR — min(L,R) 噪声估计, 沿 Range 维度
-        Pass 2: 1D Angle CFAR — min(L,R) 噪声估计, 沿 Angle 维度 (仅对检出 Range)
+        Pass 2: 1D Angle CFAR — min(L,R) 噪声估计, 沿 Angle 维度
         Pass 3: Zoom-in 角度细化 — 动态对比度阈值
 
-        AoA 方法: MUSIC / DBF / FFT (仅影响角度响应计算)
+        AoA 方法: MUSIC / DBF / FFT
         俯仰角: 不考虑
         """
         # 1. 获取数据
@@ -1413,8 +1356,11 @@ class AlgorithmProcessor:
 
         params = self.config.algo_params['POINT-CLOUD-PAPER']
         N_snaps = params['snapshots']
+        cir_offset = params.get('cir_offset', 8)
         leakage_offset = params.get('leakage_offset', 5)
-        current_cube = all_c[:, :, :, -N_snaps:]
+
+        # 跳过天线耦合区 + 取最近 N 帧
+        current_cube = all_c[:, :, cir_offset:, -N_snaps:]
 
         # 2. Leakage roll + DC removal + window
         current_cube = np.roll(current_cube, -leakage_offset, axis=2)
@@ -1425,10 +1371,8 @@ class AlgorithmProcessor:
             win = chebwin(current_cube.shape[3], at=atten)
             current_cube = current_cube * win[np.newaxis, np.newaxis, np.newaxis, :]
 
-        # 3. Doppler FFT
+        # 3. Doppler FFT + 展平 + 选通道 + 非相干合并
         rd_cube = np.fft.fft(current_cube, axis=3)
-
-        # 4. 展平 + 选通道 + 非相干合并
         rd_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
             8, rd_cube.shape[2], rd_cube.shape[3])
         valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
@@ -1439,110 +1383,185 @@ class AlgorithmProcessor:
         power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)  # (Range, Doppler)
         n_range, n_dop = power_map.shape
 
-        # 5. 沿 Doppler 累加 (仅累加感兴趣的速度区间) → 1D Range 功率曲线
+        # 4. 速度门限掩码
         v_min = params.get('doppler_sum_v_min', 1)
         v_max = params.get('doppler_sum_v_max', 20)
         vel_mask = np.zeros(n_dop, dtype=bool)
         vel_mask[v_min:v_max] = True
         vel_mask[n_dop - v_max:n_dop - v_min] = True
-        range_profile = np.sum(power_map[:, vel_mask], axis=1)
+        n_vel_bins = np.sum(vel_mask)
 
-        # ==================== Pass 1: 1D Range CFAR ====================
-        range_mask, range_noise = self.perform_1d_cfar_min(
-            range_profile,
-            train=params['range_train'],
-            guard=params['range_guard'],
-            threshold_db=params['range_threshold_db'],
-            ave_pad=params.get('range_ave_pad', 3)
-        )
-        detected_ranges = np.argwhere(range_mask).flatten()
+        # ==================== Pass 0: NVE 底噪归一化 ====================
+        noise_floor_per_range = np.median(power_map, axis=1, keepdims=True)
+        noise_floor_per_range = np.maximum(noise_floor_per_range, 1e-12)
+        snr_map_linear = power_map / noise_floor_per_range  # (Range, Doppler)
 
-        if len(detected_ranges) == 0:
+        # ==================== Pass 1: Per-Doppler 1D Range CFAR ====================
+        # 关键: 对每个 Doppler bin 独立做 1D Range CFAR, 而不是先 max 再 CFAR.
+        # max() over N 个指数噪声的期望 ≈ H_N × μ ≈ 6× baseline (7.8 dB),
+        # 使得本可检出的 14dB 目标被埋没.
+        # per-bin 的 SNR 基线是 ~1 (0 dB), CFAR 可以直接在 SNR 域正常工作.
+        rd_detections = []  # [(r_idx, d_idx, snr_linear), ...]
+        for d in range(n_dop):
+            if not vel_mask[d]:
+                continue
+            r_mask, _ = self.perform_1d_cfar_min(
+                snr_map_linear[:, d],
+                train=params['range_train'],
+                guard=params['range_guard'],
+                threshold_db=params['range_threshold_db'],
+                ave_pad=params.get('range_ave_pad', 3)
+            )
+            for r_idx in np.argwhere(r_mask).flatten():
+                rd_detections.append((int(r_idx), d, float(snr_map_linear[r_idx, d])))
+
+        if len(rd_detections) == 0:
+            peak_snr = 10 * np.log10(np.max(snr_map_linear[:, vel_mask]) + 1e-12)
+            print(f"[POINT-CLOUD-PAPER] Pass1: 0 detections "
+                  f"(peak SNR={peak_snr:.1f} dB, "
+                  f"threshold={params['range_threshold_db']:.1f} dB, "
+                  f"N_vel_bins={n_vel_bins})")
             return {
                 "detected_points": [],
                 "params": params,
                 "breath_val": 0.0,
             }
 
+        # 按 range 汇总: 每个 range bin 保留最强 SNR 的 Doppler bin
+        best_per_range = {}  # r_idx → (d_idx, snr_linear)
+        for r_idx, d_idx, snr_lin in rd_detections:
+            if r_idx not in best_per_range or snr_lin > best_per_range[r_idx][1]:
+                best_per_range[r_idx] = (d_idx, snr_lin)
+        detected_ranges = sorted(best_per_range.keys())
+
         # ==================== 准备角度扫描 ====================
-        # 粗角度网格
         coarse_n = params.get('aoa_coarse_n', 36)
         angle_deg_range = params.get('aoa_angle_range', [-70, 70])
         coarse_angles_deg = np.linspace(angle_deg_range[0], angle_deg_range[1], coarse_n)
         coarse_angles_rad = np.deg2rad(coarse_angles_deg)
 
-        # 预初始化 DBF (如果需要)
         aoa_method = params.get('aoa_method', 'MUSIC')
         if aoa_method == 'DBF':
             if getattr(self, '_dbf_sv_cache', None) is None:
-                # 用 coarse angles 初始化
                 wavelength = 2.99792458e8 / params['center_freq']
                 channels = params.get('ant_dbf_select', valid_indices)
-                all_virt_x = np.array([-0.038, 0.0, -0.038, -0.019, 0.0, 0.038, 0.0, 0.019])
+                all_virt_x = np.array([-0.038, 0.0, -0.038, -0.019,
+                                       0.0, 0.038, 0.0, 0.019])
                 ant_x = all_virt_x[channels] / wavelength
                 self._dbf_angles_cache = np.linspace(
                     np.deg2rad(angle_deg_range[0]),
                     np.deg2rad(angle_deg_range[1]),
-                    params.get('azimuth_num', 64)
-                )
+                    params.get('azimuth_num', 64))
                 self._dbf_sv_cache = np.exp(
                     -1j * 2 * np.pi *
-                    ant_x[:, np.newaxis] * np.sin(self._dbf_angles_cache[np.newaxis, :])
-                )
+                    ant_x[:, np.newaxis] * np.sin(self._dbf_angles_cache[np.newaxis, :]))
+                if params.get('ant_calib_en', False):
+                    calib_phase = np.array(params.get('ant_calib_phase',
+                                          [0.0] * 8), dtype=np.float64)
+                    calib = np.exp(1j * calib_phase[channels])
+                    self._dbf_sv_cache = self._dbf_sv_cache * calib[:, np.newaxis]
 
         # ==================== Pass 2 & 3: Per detected Range ====================
         detected_points = []
-        cir_offset = params.get('cir_offset', 8)
+        angle_quality_threshold = params.get('angle_threshold_db', 8.0)
 
         for r_idx in detected_ranges:
-            # 6a. 取该 Range 最强的 Doppler bin 的相位向量
-            d_idx = np.argmax(power_map[r_idx, :])
+            d_idx, peak_snr_linear = best_per_range[r_idx]
             phase_vec_full = rd_flat[:, r_idx, d_idx]
             phase_vec_sel = phase_vec_full[valid_indices]
+            peak_snr_db = 10 * np.log10(peak_snr_linear + 1e-12)
 
-            # 6b. 计算粗角度响应谱
+            # ============ Pass 2: 粗角度峰值检测 (替代 1D Angle CFAR) ============
+            # 计算粗角度响应谱, 直接取峰值和角度质量, 不做 CFAR
             angle_response = self._compute_angle_response(
                 phase_vec_sel, params, coarse_angles_rad)
 
-            # ==================== Pass 2: 1D Angle CFAR ====================
-            angle_mask, angle_noise = self.perform_1d_cfar_min(
-                angle_response,
-                train=params['angle_train'],
-                guard=params['angle_guard'],
-                threshold_db=params['angle_threshold_db']
-            )
-            detected_angle_indices = np.argwhere(angle_mask).flatten()
+            # 角度质量 = 峰值 / 中值 (类似 SNR)
+            angle_median = np.median(angle_response)
+            if angle_median < 1e-12:
+                continue
+            angle_peak_idx = np.argmax(angle_response)
+            angle_peak_value = angle_response[angle_peak_idx]
+            angle_snr_linear = angle_peak_value / angle_median
+            angle_snr_db = 10 * np.log10(angle_snr_linear + 1e-12)
 
-            for a_idx in detected_angle_indices:
-                coarse_angle = coarse_angles_rad[a_idx]
-                coarse_power = angle_response[a_idx]
+            # 角度质量不够 → 跳过 (相位向量可能来自噪声而非真实目标)
+            if angle_snr_db < angle_quality_threshold:
+                continue
 
-                # ================= Pass 3: Zoom-in =================
-                zoom_detections = self._zoom_in_aoa(
-                    phase_vec_sel, params, coarse_angle, coarse_power)
+            coarse_angle = coarse_angles_rad[angle_peak_idx]
 
-                # 校准 (linear)
-                calib_mode = params.get('aoa_calib_mode', 'linear')
+            # ============ Pass 3: Zoom-in 细化 + 动态对比度阈值 ============
+            zoom_factor = params.get('zoom_in_factor', 3)
+            gamma = params.get('zoom_threshold_gamma', 0.5)
+            coarse_step_deg = (angle_deg_range[1] - angle_deg_range[0]) / max(coarse_n - 1, 1)
+            zoom_step_deg = coarse_step_deg / zoom_factor
+            half_span = coarse_step_deg * 1.2
+
+            zoom_ang_deg = np.arange(
+                max(angle_deg_range[0], np.rad2deg(coarse_angle) - half_span),
+                min(angle_deg_range[1], np.rad2deg(coarse_angle) + half_span + zoom_step_deg * 0.5),
+                zoom_step_deg)
+            if len(zoom_ang_deg) < 3:
+                zoom_ang_deg = np.array([np.rad2deg(coarse_angle)])
+            zoom_angles_rad = np.deg2rad(zoom_ang_deg)
+
+            zoom_response = self._compute_angle_response(
+                phase_vec_sel, params, zoom_angles_rad)
+
+            G_max = np.max(zoom_response)
+            G_min = np.min(zoom_response)
+            if G_max + G_min < 1e-12:
+                continue
+
+            # 论文公式: 动态对比度阈值
+            # P_th = P_peak × (γ - (Gmax-Gmin)/(Gmax+Gmin))
+            contrast = (G_max - G_min) / (G_max + G_min)
+            gamma_th = G_max * max(0.15, gamma - contrast)
+
+            # 检出所有高于动态阈值的 zoom-in 角度
+            best_angle = None
+            best_zoom_snr = -np.inf
+            for u, theta in enumerate(zoom_angles_rad):
+                if zoom_response[u] > gamma_th:
+                    zoom_snr = 10 * np.log10(zoom_response[u] / (G_min + 1e-12))
+                    if zoom_snr > best_zoom_snr:
+                        best_zoom_snr = zoom_snr
+                        best_angle = theta
+
+            # fallback: 取 zoom 响应最强点
+            if best_angle is None:
+                best_u = np.argmax(zoom_response)
+                best_angle = zoom_angles_rad[best_u]
+                best_zoom_snr = 10 * np.log10(zoom_response[best_u] / (G_min + 1e-12))
+
+            # 校准
+            calib_mode = params.get('aoa_calib_mode', 'linear')
+            if calib_mode in ('linear', 'both'):
                 offset_deg = params.get('aoa_offset_deg', 0.0)
                 scale = params.get('aoa_scale', 1.0)
-                offset_rad = np.deg2rad(offset_deg)
+                best_angle = (best_angle * scale) + np.deg2rad(offset_deg)
+            best_angle = np.clip(best_angle, -np.pi / 2, np.pi / 2)
 
-                for az_angle, snr_val in zoom_detections:
-                    # 校准
-                    if calib_mode in ('linear', 'both'):
-                        az_angle = (az_angle * scale) + offset_rad
-                    az_angle = np.clip(az_angle, -np.pi / 2, np.pi / 2)
+            # 坐标转换
+            dist = r_idx * params['dist_per_tap']
+            point_x = dist * np.sin(best_angle)
+            point_y = -dist * np.cos(best_angle)
 
-                    # 坐标转换
-                    dist = (r_idx + cir_offset - 6) * params['dist_per_tap']
-                    point_x = dist * np.sin(az_angle)
-                    point_y = -dist * np.cos(az_angle)
+            # SNR: 使用 RD 域的 SNR (与 DUBHE 模式一致, 有物理意义)
+            detected_points.append({
+                'pos': (point_x, point_y),
+                'snr': float(peak_snr_db),
+                'time': time.time()
+            })
 
-                    detected_points.append({
-                        'pos': (point_x, point_y),
-                        'snr': snr_val,
-                        'time': time.time()
-                    })
+        # debug 统计
+        n_points = len(detected_points)
+        if n_points > 0 or len(detected_ranges) > 0:
+            print(f"[POINT-CLOUD-PAPER] Pass1: {len(detected_ranges)}/{n_range} ranges → "
+                  f"Pass3: {n_points} points "
+                  f"(SNR range: {np.min([p['snr'] for p in detected_points]) if n_points else 0:.1f}-"
+                  f"{np.max([p['snr'] for p in detected_points]) if n_points else 0:.1f} dB)")
 
         # ==================== Breathing ====================
         dop_fft_n = params['snapshots']
