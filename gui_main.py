@@ -56,7 +56,7 @@ _SAVE_FIELDS = [
     'connection_mode', 'serial_port', 'baud_rate', 'udp_ip', 'udp_port',
     'current_layout_name', 'current_algo', 'snapshot_rate', 'tap_interval_si',
     'data_save_dir', 'record_filename', 'record_duration',
-    'playback_duration', 'export_pc_json',
+    'playback_duration', 'export_pc_json', 'recent_save_dirs',
 ]
 
 def save_config(config):
@@ -185,8 +185,11 @@ DEFAULT_ALGO_PARAMS = {
         "indices_azimuth" : [2, 3,6,7],
         "cfar_only_selected": True,  # <--- 新增：True 表示 CFAR 仅计算选中的天线，False 表示计算全部
         "cir_offset" : 8,
+        "aoa_calib_mode": "linear",     # 角度校准模式: 'linear' / 'dbf_only' / 'both'
         "aoa_offset_deg": -12.0,    # 角度偏移（度），正值代表向右偏
         "aoa_scale": 1.0,         # 角度缩放比例，默认为 1.0
+        "ant_calib_en": False,        # 通道相位校准使能 (Capon/DBF 共用)
+        "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # 8通道校准相位(弧度)
         "doppler_tx": 1,
         "doppler_rx": 6,
     },
@@ -428,6 +431,7 @@ class RadarConfig:
     playback_file: str = ""
     playback_duration: float = 15.0  # [新增] 期望的回放总时长（秒）
     export_pc_json: bool = False  # 新增：是否在回放时导出点云 JSON
+    recent_save_dirs: List[str] = field(default_factory=lambda: ["./data"])
     def load_layout(self, name):
         if name in ANTENNA_LAYOUTS:
             self.current_layout_name = name
@@ -1086,14 +1090,44 @@ class AlgorithmProcessor:
         # print("angles ",angles[np.argmax(pseudo_spectrum)])
         return angles[np.argmax(pseudo_spectrum)]
 
+    def _get_capon_antenna_x(self, params):
+        """
+        获取 Capon 导向矢量所需的实际天线 x 坐标 (归一化到波长).
+        对齐 DBF 的 _init_dbf_steering 实现逻辑 (Dubhe 文档 Section 3.8.3).
+
+        返回:
+            ant_x:  选中通道的归一化 x 坐标 (单位: 波长)
+            channels: 对应的原始 8 通道索引列表
+        """
+        wavelength = 2.99792458e8 / params.get('center_freq', 7.9872e9)
+        # 8 通道虚拟天线 x 坐标 (m), 与 _init_dbf_steering 中的 all_virt_x 一致
+        # 通道顺序: [TX1-RX4, TX1-RX5, TX1-RX6, TX1-RX7,
+        #            TX2-RX4, TX2-RX5, TX2-RX6, TX2-RX7]
+        all_virt_x = np.array([-0.038, 0.0, -0.038, -0.019, 0.0, 0.038, 0.0, 0.019])
+        channels = params.get('indices_azimuth', [2, 3, 6, 7])
+        ant_x = all_virt_x[channels] / wavelength  # 归一化到波长
+        return ant_x, channels
+
     def calculate_capon_aoa(self, phase_vec, params):
         """
         Capon (MVDR) 自适应波束形成测角, 论文 Eq.11-13.
         对协方差矩阵求逆, 自适应抑制旁瓣, 分辨率优于 DBF/FFT.
+
+        使用真实天线位置构建导向矢量 (替代 ULA 假设),
+        支持 ant_calib_en / ant_calib_phase 通道相位校准.
+        校准方式与 DBF 的 _init_dbf_steering 对齐: 校准量作用于引导矢量.
         """
         N = len(phase_vec)
-        d = params.get("antenna_spacing", 0.5)
         diag_load = params.get("capon_diag_load", 1e-3)
+
+        # --- 预计算引导矢量的相位校准因子 (对齐 DBF / Dubhe Section 3.8.3) ---
+        ant_x, channels = self._get_capon_antenna_x(params)
+        if params.get('ant_calib_en', False):
+            calib_phase = np.array(params.get('ant_calib_phase',
+                                              [0.0] * 8), dtype=np.float64)
+            calib_sv = np.exp(1j * calib_phase[channels]).reshape(-1, 1)
+        else:
+            calib_sv = np.ones((N, 1), dtype=np.complex64)
 
         # 协方差矩阵 (单快照)
         x = phase_vec.reshape(-1, 1)
@@ -1112,12 +1146,12 @@ class AlgorithmProcessor:
         except np.linalg.LinAlgError:
             return 0.0
 
-        # 角度扫描
+        # 角度扫描 — 使用真实天线位置 + 引导矢量相位校准
         angles = np.linspace(-np.pi / 2, np.pi / 2, 180)
-        n_indices = np.arange(N)
         spectrum = np.zeros(len(angles))
         for i, theta in enumerate(angles):
-            sv = np.exp(1j * 2 * np.pi * d * np.sin(theta) * n_indices).reshape(-1, 1)
+            sv = np.exp(1j * 2 * np.pi * ant_x * np.sin(theta)).reshape(-1, 1)
+            sv = sv * calib_sv  # 相位校准作用于引导矢量 (与 DBF 一致)
             spectrum[i] = 1.0 / np.real(sv.conj().T @ R_inv @ sv)
 
         return angles[np.argmax(spectrum)]
@@ -1298,7 +1332,7 @@ class AlgorithmProcessor:
             snr_val = 10 * np.log10(
                 power_map[r_idx, d_idx] / (noise_avg[r_idx, d_idx] + 1e-12))
             detected_points.append({
-                'pos': (point_x, point_y),
+                'pos': (-point_x, point_y),
                 'snr': snr_val,
                 'time': time.time()
             })
@@ -1448,10 +1482,20 @@ class AlgorithmProcessor:
         return pseudo
 
     def _capon_angle_response(self, phase_vec, params, angles_rad):
-        """Capon (MVDR) 角度响应谱, 用于 multipass CFAR 的 Pass 2/3"""
+        """Capon (MVDR) 角度响应谱, 用于 multipass CFAR 的 Pass 2/3.
+        使用真实天线位置构建导向矢量, 支持 ant_calib_en / ant_calib_phase 相位校准.
+        校准方式与 DBF 的 _init_dbf_steering 对齐: 校准量作用于引导矢量."""
         N = len(phase_vec)
-        d = params.get('antenna_spacing', 0.5)
         diag_load = params.get("capon_diag_load", 1e-3)
+
+        # --- 预计算引导矢量的相位校准因子 (对齐 DBF / Dubhe Section 3.8.3) ---
+        ant_x, channels = self._get_capon_antenna_x(params)
+        if params.get('ant_calib_en', False):
+            calib_phase = np.array(params.get('ant_calib_phase',
+                                              [0.0] * 8), dtype=np.float64)
+            calib_sv = np.exp(-1j * calib_phase[channels]).reshape(-1, 1)
+        else:
+            calib_sv = np.ones((N, 1), dtype=np.complex64)
 
         x = phase_vec.reshape(-1, 1)
         R = x @ x.conj().T
@@ -1467,10 +1511,11 @@ class AlgorithmProcessor:
         except np.linalg.LinAlgError:
             return np.zeros(len(angles_rad))
 
-        n_indices = np.arange(N)
+        # 角度扫描 — 使用真实天线位置 + 引导矢量相位校准
         response = np.zeros(len(angles_rad))
         for i, theta in enumerate(angles_rad):
-            sv = np.exp(1j * 2 * np.pi * d * np.sin(theta) * n_indices).reshape(-1, 1)
+            sv = np.exp(1j * 2 * np.pi * ant_x * np.sin(theta)).reshape(-1, 1)
+            sv = sv * calib_sv  # 相位校准作用于引导矢量 (与 DBF 一致)
             response[i] = 1.0 / np.real(sv.conj().T @ R_inv @ sv)
 
         return response
@@ -1783,7 +1828,7 @@ class AlgorithmProcessor:
         channels = params.get('ant_dbf_select', params.get('siso_ch', [2, 3, 6, 7]))
         # 8通道虚拟天线 x 坐标 (m): [TX1-RX4, TX1-RX5, TX1-RX6, TX1-RX7,
         #                            TX2-RX4, TX2-RX5, TX2-RX6, TX2-RX7]
-        all_virt_x = np.array([-0.038, 0.0, -0.038, -0.019, 0.0, 0.038, 0.0, 0.019])
+        all_virt_x = np.array([0.0 * wavelength , 0.5*wavelength , 1*wavelength, 0.5*wavelength, 0.5*wavelength, wavelength, 0*wavelength, -0.5*wavelength])
         ant_x = all_virt_x[channels] / wavelength
 
         azi_deg = np.linspace(params['azi_angle_range'][0],
@@ -2049,7 +2094,7 @@ class SeatOccupancyDetector:
         N_list = [len(seat_points[s['name']]) for s in self.seats]
         sigma_list = [self._compute_dispersion(seat_points[s['name']])
                       for s in self.seats]
-
+        print(sigma_list)
         # 2. 公式 (14): 归一化特征 f_k
         products = [sigma_list[i] * (N_list[i] / N) for i in range(len(self.seats))]
         denom = sum(products)
@@ -2057,13 +2102,14 @@ class SeatOccupancyDetector:
             f_values_list = [0.0] * len(self.seats)
         else:
             f_values_list = [p / denom for p in products]
-
+            
         for i, seat in enumerate(self.seats):
             self.f_values[seat['name']] = f_values_list[i]
-
+            
         # 3. 公式 (15): 阈值判决
         for i, seat in enumerate(self.seats):
             so_instant = 1 if f_values_list[i] > seat['th'] else 0
+            
             self.state_history[seat['name']].append(so_instant)
 
         # 4. 公式 (16): 滑动平均平滑
@@ -2752,37 +2798,77 @@ class ControlPanel(tk.Frame):
         self.cb_layout.pack(side='right', fill='x', expand=True)
         self.cb_layout.bind("<<ComboboxSelected>>", self._on_layout_change)
 
-        # --- [新增] 录制设置面板 ---
+        # --- [重构] 录制设置面板: 座位勾选 + 目录下拉 + 文件名自动生成 ---
         frm_rec = tk.LabelFrame(self, text="Recording Settings", bg='#f0f0f0', fg='blue')
         frm_rec.pack(fill='x', padx=5, pady=5)
 
-        # 1. 保存路径
-        row_path = tk.Frame(frm_rec, bg='#f0f0f0')
-        row_path.pack(fill='x', padx=2, pady=2)
-        tk.Label(row_path, text="Save To:", bg='#f0f0f0', width=8, anchor='w').pack(side='left')
-        self.var_save_dir = tk.StringVar(value=config.data_save_dir)
-        tk.Entry(row_path, textvariable=self.var_save_dir, font=('Arial', 8)).pack(side='left', fill='x', expand=True)
-        tk.Button(row_path, text="...", width=3, command=self._choose_dir).pack(side='right')
+        # 1. 占用状态勾选
+        row_occ_label = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_occ_label.pack(fill='x', padx=2, pady=(5, 0))
+        tk.Label(row_occ_label, text="占用状态:", bg='#f0f0f0', anchor='w').pack(side='left')
 
-        # 2. [新增] 文件名 (File Name)
+        row_occ = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_occ.pack(fill='x', padx=2, pady=2)
+        self._occ_row = row_occ  # 保存引用, 供 _refresh_occ_checkboxes 重建用
+
+        self._occ_check_vars = {}
+        occ_cfg = config.algo_params.get('SEAT-OCCUPANCY', {})
+        seat_type = occ_cfg.get('seat_type', '4_seats')
+        num_seats = 4 if seat_type == '4_seats' else 5
+        seat_key = 'seats_4' if seat_type == '4_seats' else 'seats_5'
+        seat_defs = occ_cfg.get(seat_key, occ_cfg.get('seats_4', []))
+        for s in seat_defs[:num_seats]:
+            name = s.get('name', str(len(self._occ_check_vars) + 1))
+            var = tk.BooleanVar(value=False)
+            self._occ_check_vars[name] = var
+            cb = tk.Checkbutton(row_occ, text=f"座椅{name}", variable=var,
+                               bg='#f0f0f0', command=self._on_occ_checkbox_change)
+            cb.pack(side='left', padx=3)
+
+        row_occ_btn = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_occ_btn.pack(fill='x', padx=2, pady=(0, 5))
+        tk.Button(row_occ_btn, text="全选", width=4, font=('Arial', 7),
+                  command=self._occ_select_all).pack(side='left', padx=2)
+        tk.Button(row_occ_btn, text="清空", width=4, font=('Arial', 7),
+                  command=self._occ_clear_all).pack(side='left', padx=2)
+        tk.Button(row_occ_btn, text="前排", width=4, font=('Arial', 7),
+                  command=lambda: self._occ_select_front(num_seats)).pack(side='left', padx=2)
+
+        # 2. 保存目录下拉 + 浏览
+        row_dir = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_dir.pack(fill='x', padx=2, pady=2)
+        tk.Label(row_dir, text="保存目录:", bg='#f0f0f0', anchor='w').pack(side='left')
+        # 确保默认目录在列表里
+        if config.data_save_dir not in config.recent_save_dirs:
+            config.recent_save_dirs.insert(0, config.data_save_dir)
+        self._recent_dirs = config.recent_save_dirs
+        self.var_save_dir = tk.StringVar(value=config.data_save_dir)
+        self.cb_save_dir = ttk.Combobox(row_dir, textvariable=self.var_save_dir,
+                                        values=self._recent_dirs, width=28)
+        self.cb_save_dir.pack(side='left', fill='x', expand=True, padx=(0, 2))
+        self.cb_save_dir.bind('<<ComboboxSelected>>', self._on_save_dir_change)
+        self.cb_save_dir.bind('<FocusOut>', self._on_save_dir_change)
+        tk.Button(row_dir, text="浏览...", width=6, font=('Arial', 8),
+                  command=self._choose_dir).pack(side='right')
+
+        # 3. 文件名预览
         row_fname = tk.Frame(frm_rec, bg='#f0f0f0')
         row_fname.pack(fill='x', padx=2, pady=2)
-        tk.Label(row_fname, text="File Name:", bg='#f0f0f0', width=9, anchor='w').pack(side='left')
-        # 如果配置里没有文件名，给一个带时间戳的默认值
-        default_name = config.record_filename if config.record_filename else f"radar_{datetime.now():%H%M%S}.bin"
-        self.var_save_name = tk.StringVar(value=default_name)
-        tk.Entry(row_fname, textvariable=self.var_save_name, font=('Arial', 8)).pack(side='left', fill='x', expand=True)
+        tk.Label(row_fname, text="文件名:", bg='#f0f0f0', anchor='w').pack(side='left')
+        self.lbl_fname_preview = tk.Label(row_fname, text="", bg='#fff', anchor='w',
+                                          font=('Arial', 8), relief='sunken', padx=4)
+        self.lbl_fname_preview.pack(side='left', fill='x', expand=True)
+        self._refresh_filename_preview()
 
-
-        # 3. 时长设置
+        # 4. 时长设置
         row_dur = tk.Frame(frm_rec, bg='#f0f0f0')
         row_dur.pack(fill='x', padx=2, pady=2)
-        tk.Label(row_dur, text="Dur(s):", bg='#f0f0f0', width=8, anchor='w').pack(side='left')
+        tk.Label(row_dur, text="录制时长:", bg='#f0f0f0', anchor='w').pack(side='left')
         self.var_rec_dur = tk.DoubleVar(value=config.record_duration)
-        tk.Entry(row_dur, textvariable=self.var_rec_dur).pack(side='left', fill='x', expand=True)
-        tk.Label(row_dur, text="(0=Inf)", bg='#f0f0f0', fg='gray').pack(side='right')
+        tk.Entry(row_dur, textvariable=self.var_rec_dur, width=6).pack(side='left', padx=4)
+        tk.Label(row_dur, text="秒 (0=不限)", bg='#f0f0f0', fg='gray').pack(side='left')
 
-        # 4. 录制按钮
+        # 5. 录制按钮
         self.btn_rec = tk.Button(frm_rec, text="Start Recording", command=self._rec, bg='#ddd')
         self.btn_rec.pack(fill='x', padx=5, pady=5)
 
@@ -2878,11 +2964,79 @@ class ControlPanel(tk.Frame):
             except: pass
         v.trace_add("write", _save)
 
+    # ===== 录制文件名自动生成辅助方法 =====
+    def _gen_base_filename(self):
+        """根据座位勾选状态生成基础文件名, 不含序号后缀."""
+        selected = sorted([name for name, var in self._occ_check_vars.items() if var.get()])
+        if not selected:
+            return "occ_empty.bin"
+        return f"occ_{'_'.join(selected)}.bin"
+
+    def _get_unique_filepath(self, directory, base_name):
+        """在 directory 下找不冲突的文件名, 必要时加 _2, _3... 后缀.
+        返回 (完整路径, 实际使用的文件名)."""
+        base_stem = base_name.rsplit('.', 1)[0]
+        ext = '.bin'
+        candidate = os.path.join(directory, base_name)
+        if not os.path.exists(candidate):
+            return candidate, base_name
+        n = 2
+        while True:
+            new_name = f"{base_stem}_{n}{ext}"
+            candidate = os.path.join(directory, new_name)
+            if not os.path.exists(candidate):
+                return candidate, new_name
+            n += 1
+
+    def _refresh_filename_preview(self):
+        """更新文件名预览 Label."""
+        base = self._gen_base_filename()
+        directory = self.var_save_dir.get().strip() or self.config.data_save_dir
+        full_path, actual_name = self._get_unique_filepath(directory, base)
+        if actual_name == base:
+            self.lbl_fname_preview.config(text=base, fg='black')
+        else:
+            self.lbl_fname_preview.config(
+                text=f"{actual_name} (原名 {base} 已存在)", fg='#cc6600')
+        # 缓存供 _rec 使用
+        self._cached_rec_path = full_path
+
+    def _on_occ_checkbox_change(self):
+        self._refresh_filename_preview()
+
+    def _on_save_dir_change(self, *_):
+        directory = self.var_save_dir.get().strip()
+        if directory and directory not in self._recent_dirs:
+            self._recent_dirs.insert(0, directory)
+            if len(self._recent_dirs) > 10:
+                self._recent_dirs = self._recent_dirs[:10]
+            self.config.recent_save_dirs = self._recent_dirs
+            self.cb_save_dir['values'] = self._recent_dirs
+        self.config.data_save_dir = directory
+        self._refresh_filename_preview()
+
+    def _occ_select_all(self):
+        for var in self._occ_check_vars.values():
+            var.set(True)
+        self._refresh_filename_preview()
+
+    def _occ_clear_all(self):
+        for var in self._occ_check_vars.values():
+            var.set(False)
+        self._refresh_filename_preview()
+
+    def _occ_select_front(self, num_seats):
+        """前排: 前2个座椅选中, 其余清空 (模拟常见的前排有人场景)"""
+        for i, (name, var) in enumerate(self._occ_check_vars.items()):
+            var.set(i < 2)
+        self._refresh_filename_preview()
+
     def _choose_dir(self):
-        d = filedialog.askdirectory(initialdir=self.config.data_save_dir)
+        d = filedialog.askdirectory(initialdir=self.var_save_dir.get() or self.config.data_save_dir)
         if d:
             self.config.data_save_dir = d
             self.var_save_dir.set(d)
+            self._on_save_dir_change()
 
     def _on_mode_change(self, *_):
         self.config.connection_mode = self.mode_var.get()
@@ -2912,6 +3066,32 @@ class ControlPanel(tk.Frame):
                                       save_config(self.config),
                                       self.cbs['update_layout'](self.config.current_algo)))
 
+    def _refresh_occ_checkboxes(self):
+        """销毁并重建座位勾选框, 用于车型切换后即时刷新."""
+        occ_cfg = self.config.algo_params.get('SEAT-OCCUPANCY', {})
+        seat_type = occ_cfg.get('seat_type', '4_seats')
+        seat_key = 'seats_4' if seat_type == '4_seats' else 'seats_5'
+        seat_defs = occ_cfg.get(seat_key, occ_cfg.get('seats_4', []))
+        # 清除旧 checkbox widget
+        for name in list(self._occ_check_vars.keys()):
+            var = self._occ_check_vars.pop(name)
+            # 找到并销毁对应的 Checkbutton
+            for w in self._occ_row.winfo_children():
+                if isinstance(w, tk.Checkbutton):
+                    # 匹配 variable 判断归属
+                    if w.cget('variable') == str(var):
+                        w.destroy()
+                        break
+        # 重建新 checkbox
+        for s in seat_defs:
+            name = s.get('name', str(len(self._occ_check_vars) + 1))
+            var = tk.BooleanVar(value=False)
+            self._occ_check_vars[name] = var
+            cb = tk.Checkbutton(self._occ_row, text=f"座椅{name}", variable=var,
+                               bg='#f0f0f0', command=self._on_occ_checkbox_change)
+            cb.pack(side='left', padx=3)
+        self._refresh_filename_preview()
+
     def _open_seats(self):
         occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
         def on_save(new_p):
@@ -2919,6 +3099,8 @@ class ControlPanel(tk.Frame):
             save_config(self.config)
             # 重建检测器 + 刷新当前布局使椭圆立即生效
             self.cbs['update_layout'](self.config.current_algo)
+            # 刷新录制面板的座位勾选框（支持4/5座切换）
+            self._refresh_occ_checkboxes()
         SeatConfigDialog(self, occ_params, on_save)
 
     def _sel_pb(self): 
@@ -2935,36 +3117,31 @@ class ControlPanel(tk.Frame):
         if not self.recording_state:
             # --- 开始录制 ---
             try:
-                # 1. 获取并校验路径
+                # 1. 获取目录并自动生成文件名
                 save_dir = self.var_save_dir.get().strip()
                 self.config.data_save_dir = save_dir
-                
-                # 2. 获取并校验文件名
-                fname = self.var_save_name.get().strip()
-                if not fname:
-                    fname = f"radar_{datetime.now():%Y%m%d_%H%M%S}.bin"
-                
-                # 自动补全 .bin 后缀
-                if not fname.lower().endswith('.bin'):
-                    fname += ".bin"
-                
+
+                # 刷新预览以确保 _cached_rec_path 是最新的
+                self._refresh_filename_preview()
+                full_path = self._cached_rec_path
+                fname = os.path.basename(full_path)
+
                 self.config.record_filename = fname
-                self.var_save_name.set(fname) # 更新UI显示
 
                 self.config.record_duration = float(self.var_rec_dur.get())
             except ValueError:
                 messagebox.showerror("Error", "无效的参数输入")
                 return
 
-            # 3. 检查并创建目录
-            if not os.path.exists(self.config.data_save_dir):
-                try: os.makedirs(self.config.data_save_dir)
-                except: messagebox.showerror("Error", "无法创建保存目录"); return
+            # 2. 检查并创建目录
+            if not os.path.exists(save_dir):
+                try:
+                    os.makedirs(save_dir)
+                except:
+                    messagebox.showerror("Error", "无法创建保存目录")
+                    return
 
-            # 4. 拼接完整路径
-            full_path = os.path.join(self.config.data_save_dir, self.config.record_filename)
-            
-            # 5. 调用后端开始录制
+            # 3. 调用后端开始录制
             if self.cbs['rec_start'](full_path, self.config.record_duration):
                 self.recording_state = True
                 self.btn_rec.config(bg='#f88', text="Stop Recording")
