@@ -197,6 +197,7 @@ DEFAULT_ALGO_PARAMS = {
     "POINT-CLOUD-OPTIMIZED": {
         "center_freq": 7.9872e9,
         "snapshots": 64,
+        "cir_combine_num": 1,
         "leakage_offset": 5,
         "doppler_window": "chebyshev",
         "doppler_win_atten": 60,
@@ -398,7 +399,7 @@ class ConfigAdapter:
 class RadarConfig:
     # --- 硬件与通信 ---
     ft_len: int = 32
-    max_snapshots: int = 127
+    max_snapshots: int = 540
     udp_tx_list: List[int] = field(default_factory=lambda: [1, 2])
     udp_rx_list: List[int] = field(default_factory=lambda: [4, 5, 6, 7])
     bg_m_factor: float = 4
@@ -1254,26 +1255,38 @@ class AlgorithmProcessor:
 
         params = self.config.algo_params['POINT-CLOUD-OPTIMIZED']
         N_snaps = params['snapshots']
+        cir_comb = params.get('cir_combine_num', 1)
         leakage_offset = params['leakage_offset']
         current_cube = all_c[:, :, :, -N_snaps:]  # (4, 2, 32, N)
 
-        # 1. 泄漏处理: np.roll 替代截断
+        # 1. CIR 相干积累: 每 cir_comb 帧复数累加取均值
+        #    → 提升 SNR ~10log10(cir_comb) dB
+        #    → 压缩慢时间轴, 等效帧周期 × cir_comb (抗混叠低通)
+        #    → 观测窗口不变时, 等效 Doppler bin 更少但 bin 内噪底更低
+        if cir_comb > 1:
+            n_comb = current_cube.shape[3] // cir_comb
+            trim = n_comb * cir_comb
+            current_cube = current_cube[:, :, :, :trim] \
+                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
+            # shape: (4, 2, 32, n_comb)
+
+        # 2. 泄漏处理: np.roll 替代截断
         current_cube = np.roll(current_cube, -leakage_offset, axis=2)
 
-        # 2. 慢时间 DC 去除
+        # 3. 慢时间 DC 去除
         if params.get('doppler_dc_remove', True):
             current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
 
-        # 3. 慢时间加窗 (Chebyshev)
+        # 4. 慢时间加窗 (Chebyshev)
         if params.get('doppler_window') == 'chebyshev':
             atten = params.get('doppler_win_atten', 60)
             win = chebwin(current_cube.shape[3], at=atten)
             current_cube = current_cube * win[np.newaxis, np.newaxis, np.newaxis, :]
 
-        # 4. Doppler FFT
+        # 5. Doppler FFT
         rd_cube = np.fft.fft(current_cube, axis=3)
 
-        # 5. 展平 8 通道 + 选通道 + 非相干合并
+        # 6. 展平 8 通道 + 选通道 + 非相干合并
         rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
             8, rd_cube.shape[2], rd_cube.shape[3])
         valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
@@ -1283,10 +1296,10 @@ class AlgorithmProcessor:
             rd_sel = rd_cube_flat
         power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)
 
-        # 6. CA-CFAR
+        # 7. CA-CFAR
         mask, noise_avg = self.perform_ca_cfar_2d(power_map, params)
 
-        # 7. Velocity + Range gating (仿 Dubhe 双侧通带)
+        # 8. Velocity + Range gating (仿 Dubhe 双侧通带)
         n_dop = power_map.shape[1]
         v_min = params.get('cfar_velocity_min', 1)
         v_max = params.get('cfar_velocity_max', 20)
@@ -1300,13 +1313,13 @@ class AlgorithmProcessor:
         mask[:r_min, :] = False
         mask[r_max:, :] = False
 
-        # 8. 局部峰值滤波
+        # 9. 局部峰值滤波
         if params.get('cfar_doppler_peak_flag'):
             mask &= (power_map == ndimage.maximum_filter(power_map, size=(1, 3)))
         if params.get('cfar_range_peak_flag'):
             mask &= (power_map == ndimage.maximum_filter(power_map, size=(3, 1)))
 
-        # 9. 检出 + 子网格细化 + AoA
+        # 10. 检出 + 子网格细化 + AoA
         hit_indices = np.argwhere(mask)
         detected_points = []
         for r_idx, d_idx in hit_indices:
@@ -1337,7 +1350,7 @@ class AlgorithmProcessor:
                 'time': time.time()
             })
 
-        # 10. Breathing
+        # 11. Breathing
         dop_fft_n = params['snapshots']
         val_breath = 0.0
         try:
