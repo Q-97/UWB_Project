@@ -225,6 +225,12 @@ DEFAULT_ALGO_PARAMS = {
         "aoa_calib_mode": "linear",
         "ant_calib_en": False,
         "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        # ---- 角度维 CFAR 寻峰 (替代 prominence, 局部噪声估计) ----
+        "aoa_cfar_en": True,             # 启用角度CFAR寻峰
+        "aoa_cfar_guard": 4,             # 保护单元半窗 (bin数)
+        "aoa_cfar_train": 8,             # 训练单元半窗 (bin数)
+        "aoa_cfar_threshold_db": 10.0,   # CFAR阈值 (dB)
+        "aoa_debug_print": False,        # 调试打印: 角度谱/相位/寻峰详情
         "dist_per_tap": 0.1875,
         "point_lifetime_sec": 1.5,
         "plot_xlim": 1.5,
@@ -338,6 +344,47 @@ DEFAULT_ALGO_PARAMS = {
         # --- Breathing ---
         "doppler_tx": 1,
         "doppler_rx": 6,
+    },
+
+    "RA-CFAR": {
+        "center_freq": 7.9872e9,
+        "snapshots": 64,
+        "cir_combine_num": 1,
+        "leakage_offset": 5,
+        "doppler_window": "chebyshev",
+        "doppler_win_atten": 60,
+        "doppler_dc_remove": True,
+        "indices_azimuth": [2, 3, 6, 7],
+        "ant_dbf_select": [2, 3, 6, 7],
+        "azi_angle_range": [-70, 70],
+        "azimuth_num": 64,
+        "ant_calib_en": False,
+        "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "capon_diag_load": 1e-3,            # Capon 对角加载 (论文 Eq.11 的 β)
+        # ---- CFAR 检测 ----
+        "cfar_mode": "2d_ca",              # '2d_ca'=二维CA-CFAR / 'two_pass'=论文Algorithm1
+        # -- 2D CA-CFAR 参数 --
+        "range_train": 3, "range_guard": 1,
+        "azimuth_train": 4, "azimuth_guard": 2,
+        "cfar_threshold_db": 10.0,
+        "cfar_range_peak_flag": False,
+        "cfar_azimuth_peak_flag": True,
+        "cfar_range_min": 2, "cfar_range_max": 20,
+        # -- Two-Pass CFAR 参数 (cfar_mode='two_pass' 时生效) --
+        "pass1_N_W_R": 3, "pass1_N_G_R": 1, "pass1_N_ave_R": 2,
+        "pass1_gamma_R_db": 10.0,
+        "pass2_N_W_phi": 4, "pass2_N_G_phi": 2,
+        "pass2_gamma_phi_db": 10.0,
+        # ---- 点云参数 ----
+        "dist_per_tap": 0.1875,
+        "point_lifetime_sec": 1.5,
+        "plot_xlim": 1.5,
+        "plot_ylim_min": -2.5,
+        "plot_ylim_max": 0.0,
+        "aoa_offset_deg": -12.0,
+        "aoa_scale": 1.0,
+        "aoa_calib_mode": "linear",
+        "aoa_debug_print": False,
     },
 
     "SEAT-OCCUPANCY": {
@@ -606,6 +653,8 @@ class AlgorithmProcessor:
         self.dubhe_new_comb_cnt = 0
         self._dbf_sv = None
         self._dbf_angles = None
+        self._capon_sv = None
+        self._capon_angles = None
 
     def _init_music_if_needed(self):
         if self.init_done: return
@@ -914,27 +963,32 @@ class AlgorithmProcessor:
         # grid_2d = self.map_to_2d_grid(phase_vec)
         
         method = params.get("aoa_method", "FFT")
-        
-        # 1. 计算原始角度 (Radiants)
+
+        # 1. 计算原始角度列表 (弧度)
         if method == "FFT":
-            angle = -self.calculate_fft_aoa(phase_vec, params)
+            az_list = [-self.calculate_fft_aoa(phase_vec, params)]
         elif method == "MUSIC":
-            angle = -self.calculate_music_aoa(phase_vec, params)
+            az_list = [-self.calculate_music_aoa(phase_vec, params)]
         elif method == "Capon":
-            angle = -self.calculate_capon_aoa(phase_vec, params)
+            # calculate_capon_aoa 已返回 List[float] (含多峰检测)
+            az_list = [-a for a in self.calculate_capon_aoa(phase_vec, params)]
         else:
-            angle = 0.0
+            az_list = [0.0]
 
-        # 2. 校准 (FFT/MUSIC 仅支持 linear 模式)
+        # 2. 校准: 对每个角度应用
         calib_mode = params.get('aoa_calib_mode', 'linear')
-        if calib_mode in ('linear', 'both'):
-            offset_deg = params.get("aoa_offset_deg", 0.0)
-            scale = params.get("aoa_scale", 1.0)
-            offset_rad = np.deg2rad(offset_deg)
-            angle = (angle * scale) + offset_rad
-        angle = np.clip(angle, -np.pi/2, np.pi/2)
+        offset_deg = params.get("aoa_offset_deg", 0.0)
+        scale = params.get("aoa_scale", 1.0)
+        offset_rad = np.deg2rad(offset_deg)
 
-        return angle
+        result = []
+        for az in az_list:
+            if calib_mode in ('linear', 'both'):
+                az = (az * scale) + offset_rad
+            az = np.clip(az, -np.pi / 2, np.pi / 2)
+            result.append(az)
+
+        return result  # List[float]
     
     def calculate_2d_fft_aoa(self, grid_2d, params):
         """
@@ -1113,6 +1167,7 @@ class AlgorithmProcessor:
         """
         Capon (MVDR) 自适应波束形成测角, 论文 Eq.11-13.
         对协方差矩阵求逆, 自适应抑制旁瓣, 分辨率优于 DBF/FFT.
+        返回角度列表 (弧度) — 支持多峰检测.
 
         使用真实天线位置构建导向矢量 (替代 ULA 假设),
         支持 ant_calib_en / ant_calib_phase 通道相位校准.
@@ -1145,7 +1200,7 @@ class AlgorithmProcessor:
         try:
             R_inv = np.linalg.inv(R)
         except np.linalg.LinAlgError:
-            return 0.0
+            return [0.0]
 
         # 角度扫描 — 使用真实天线位置 + 引导矢量相位校准
         angles = np.linspace(-np.pi / 2, np.pi / 2, 180)
@@ -1155,7 +1210,8 @@ class AlgorithmProcessor:
             sv = sv * calib_sv  # 相位校准作用于引导矢量 (与 DBF 一致)
             spectrum[i] = 1.0 / np.real(sv.conj().T @ R_inv @ sv)
 
-        return angles[np.argmax(spectrum)]
+        # 多峰检测
+        return self._find_angle_peaks(spectrum, angles, params)
 
     def step_point_cloud(self):
         """
@@ -1204,23 +1260,22 @@ class AlgorithmProcessor:
             phase_vec_full = rd_cube_flat[:, r_idx, d_idx]
             phase_vec_selected = phase_vec_full[valid_indices]
 
-            # AoA 角度估算
-            az_angle = self.estimate_aoa(phase_vec_selected, params)
+            # AoA 角度估算 → 返回 List[float]
+            az_list = self.estimate_aoa(phase_vec_selected, params)
             # 5. 坐标转换与点云构建
             # Range = 索引 * 分辨率
-            dist = (r_idx+cir_offset - 6) * params['dist_per_tap']
-
-            # 笛卡尔坐标映射: x(横向), y(纵向)
-            point_x = dist *  np.sin(az_angle)
-            point_y = -dist * np.cos(az_angle) # 纵向深度
-            # point_z = dist * np.sin(el_angle) # 目标相对于雷达平面的高度
-            # 计算 SNR 用于可视化强度
+            dist = (r_idx + cir_offset - 6) * params['dist_per_tap']
             snr_val = 10 * np.log10(power_map[r_idx, d_idx] / (noise_avg[r_idx, d_idx] + 1e-12))
-            detected_points.append({
-            'pos': (point_x, point_y),
-            'snr': snr_val,
-            'time': time.time() # 记录时间戳用于"出现后消失"效果
-            })
+
+            for az_angle in az_list:
+                # 笛卡尔坐标映射: x(横向), y(纵向)
+                point_x = dist * np.sin(az_angle)
+                point_y = -dist * np.cos(az_angle)  # 纵向深度
+                detected_points.append({
+                    'pos': (point_x, point_y),
+                    'snr': snr_val,
+                    'time': time.time()  # 记录时间戳用于"出现后消失"效果
+                })
 
         # 6. Breathing
         dop_fft_n = params['snapshots']
@@ -1321,6 +1376,12 @@ class AlgorithmProcessor:
 
         # 10. 检出 + 子网格细化 + AoA
         hit_indices = np.argwhere(mask)
+        if params.get('aoa_debug_print', False) and len(hit_indices) > 0:
+            print(f"\n[CFAR DEBUG] 检出 {len(hit_indices)} 个 range-doppler bin:")
+            for r_idx, d_idx in hit_indices:
+                snr = 10 * np.log10(power_map[r_idx, d_idx] / (noise_avg[r_idx, d_idx] + 1e-12))
+                dist = r_idx * params['dist_per_tap']
+                print(f"  range_bin={r_idx} ({dist:.2f}m), doppler_bin={d_idx}, SNR={snr:.1f}dB")
         detected_points = []
         for r_idx, d_idx in hit_indices:
             r_fine, d_fine = r_idx, d_idx
@@ -1330,25 +1391,26 @@ class AlgorithmProcessor:
             phase_vec_full = rd_cube_flat[:, r_idx, d_idx]
             phase_vec_sel = phase_vec_full[valid_indices]
 
-            # AoA 分发: FFT / MUSIC / DBF
+            # AoA 分发: FFT / MUSIC / DBF → 每个返回 List[float]
             aoa_method = params.get('aoa_method', 'MUSIC')
             if aoa_method == 'DBF':
                 if getattr(self, '_dbf_sv', None) is None:
                     self._init_dbf_steering(params)
-                az_angle = self._dbf_estimate(phase_vec_sel, params)
+                az_list = self._dbf_estimate(phase_vec_sel, params)
             else:
-                az_angle = self.estimate_aoa(phase_vec_sel, params)
+                az_list = self.estimate_aoa(phase_vec_sel, params)
 
             dist = r_fine * params['dist_per_tap']
-            point_x = dist * np.sin(az_angle)
-            point_y = -dist * np.cos(az_angle)
             snr_val = 10 * np.log10(
                 power_map[r_idx, d_idx] / (noise_avg[r_idx, d_idx] + 1e-12))
-            detected_points.append({
-                'pos': (-point_x, point_y),
-                'snr': snr_val,
-                'time': time.time()
-            })
+            for az_angle in az_list:
+                point_x = dist * np.sin(az_angle)
+                point_y = -dist * np.cos(az_angle)
+                detected_points.append({
+                    'pos': (-point_x, point_y),
+                    'snr': snr_val,
+                    'time': time.time()
+                })
 
         # 11. Breathing
         dop_fft_n = params['snapshots']
@@ -1372,6 +1434,231 @@ class AlgorithmProcessor:
             "detected_points": detected_points,
             "params": self.config.algo_params['POINT-CLOUD-OPTIMIZED'],
             "breath_val": val_breath,
+        }
+
+    def step_angle_spectrum_view(self):
+        """
+        角度谱调试视图: 与 step_point_cloud_optimized 完全相同的预处理 + CFAR,
+        但对每个检出 bin 不做 argmax/寻峰, 而是返回完整的 DBF 角度谱曲线.
+
+        用于调试: 直观看同一个 range-doppler bin 的角度谱上有没有第二个峰.
+        """
+        all_c = self.dm.get_all_snapshot_as_array('complex')
+        all_a = self.dm.get_all_snapshot_as_array('abs')
+        if all_c is None:
+            return None
+
+        params = self.config.algo_params['POINT-CLOUD-OPTIMIZED']
+        N_snaps = params['snapshots']
+        cir_comb = params.get('cir_combine_num', 1)
+        leakage_offset = params['leakage_offset']
+        current_cube = all_c[:, :, :, -N_snaps:]
+
+        # 1-5. 与 step_point_cloud_optimized 完全相同的预处理
+        if cir_comb > 1:
+            n_comb = current_cube.shape[3] // cir_comb
+            trim = n_comb * cir_comb
+            current_cube = current_cube[:, :, :, :trim] \
+                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
+        current_cube = np.roll(current_cube, -leakage_offset, axis=2)
+        if params.get('doppler_dc_remove', True):
+            current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
+        if params.get('doppler_window') == 'chebyshev':
+            atten = params.get('doppler_win_atten', 60)
+            win = chebwin(current_cube.shape[3], at=atten)
+            current_cube = current_cube * win[np.newaxis, np.newaxis, np.newaxis, :]
+        rd_cube = np.fft.fft(current_cube, axis=3)
+
+        # 6. 展平 + 选通道 + 非相干合并
+        rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
+            8, rd_cube.shape[2], rd_cube.shape[3])
+        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
+        if params.get('cfar_only_selected', True):
+            rd_sel = rd_cube_flat[valid_indices, :, :]
+        else:
+            rd_sel = rd_cube_flat
+        power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)
+
+        # 7. CA-CFAR (与 step_point_cloud_optimized 相同)
+        mask, noise_avg = self.perform_ca_cfar_2d(power_map, params)
+        n_dop = power_map.shape[1]
+        v_min = params.get('cfar_velocity_min', 1)
+        v_max = params.get('cfar_velocity_max', 20)
+        vel_mask = np.zeros(n_dop, dtype=bool)
+        vel_mask[v_min:v_max] = True
+        vel_mask[n_dop - v_max:n_dop - v_min] = True
+        mask &= vel_mask[np.newaxis, :]
+        r_min = params.get('cfar_range_min', 2)
+        r_max = params.get('cfar_range_max', 20)
+        mask[:r_min, :] = False
+        mask[r_max:, :] = False
+        if params.get('cfar_doppler_peak_flag'):
+            mask &= (power_map == ndimage.maximum_filter(power_map, size=(1, 3)))
+        if params.get('cfar_range_peak_flag'):
+            mask &= (power_map == ndimage.maximum_filter(power_map, size=(3, 1)))
+
+        # 8. 初始化 DBF 引导矢量
+        if getattr(self, '_dbf_sv', None) is None:
+            self._init_dbf_steering(params)
+        angles_deg = np.rad2deg(self._dbf_angles)
+
+        # 9. 对每个 CFAR 检出 bin, 计算完整角度谱
+        hit_indices = np.argwhere(mask)
+        spectra = []
+        for r_idx, d_idx in hit_indices:
+            r_fine, d_fine = r_idx, d_idx
+            if params.get('subbin_refine_en', True):
+                r_fine, d_fine = self._subbin_refine(power_map, r_idx, d_idx)
+
+            phase_vec_full = rd_cube_flat[:, r_idx, d_idx]
+            phase_vec_sel = phase_vec_full[valid_indices]
+
+            # DBF 角度谱 (完整曲线, 不做 argmax)
+            x = phase_vec_sel.reshape(-1, 1)
+            pwr = np.abs(self._dbf_sv.conj().T @ x) ** 2
+            pwr = pwr.flatten()
+
+            dist = r_fine * params['dist_per_tap']
+            snr_db = 10 * np.log10(power_map[r_idx, d_idx] / (noise_avg[r_idx, d_idx] + 1e-12))
+
+            spectra.append({
+                'angles_deg': angles_deg,
+                'pwr_linear': pwr,
+                'pwr_db': 10 * np.log10(pwr + 1e-12),
+                'range_m': dist,
+                'doppler_bin': d_idx,
+                'snr_db': snr_db,
+            })
+
+        return {
+            'spectra': spectra,
+            'params': params,
+            'power_map': power_map,
+            'n_detections': len(spectra),
+        }
+
+    def step_point_cloud_ra_cfar(self):
+        """
+        Range-Azimuth Two-Pass CFAR (论文 IEEE JSEN 2024 Algorithm 1):
+          1. 计算 DBF Range-Azimuth 热力图
+          2. Pass 1: 沿 Range 维 1D CFAR
+          3. Pass 2: 沿 Azimuth 维 1D CFAR (仅对 Pass1 检出的 range)
+          4. 每个检出 (r, θ) → 笛卡尔坐标 → 点云
+
+        与 step_point_cloud_optimized 的核心区别:
+          - 角度作为检测维度参与 CFAR, 而非事后测角
+          - 不使用 Doppler 维 (每 range 取最强 Doppler 代替)
+        """
+        params = self.config.algo_params['RA-CFAR']
+
+        # 1. 计算 Range-Azimuth 热力图 (Capon, 含 R^{-1} 和 chirp 原始数据)
+        H, ranges_m, angles_deg, A_all, R_inv_list = self._compute_ra_heatmap(params)
+        if H is None:
+            return None
+
+        # 2. CFAR 检测
+        cfar_mode = params.get('cfar_mode', '2d_ca')
+        if cfar_mode == '2d_ca':
+            # 2D CA-CFAR: 复用 perform_ca_cfar_2d, azimuth 映射到 doppler 维
+            cfar_params = params.copy()
+            cfar_params['doppler_train'] = params.get('azimuth_train', 4)
+            cfar_params['doppler_guard'] = params.get('azimuth_guard', 2)
+            mask, noise_avg = self.perform_ca_cfar_2d(H, cfar_params)
+            # 峰值滤波
+            if params.get('cfar_range_peak_flag', False):
+                mask &= (H == ndimage.maximum_filter(H, size=(3, 1)))
+            if params.get('cfar_azimuth_peak_flag', False):
+                mask &= (H == ndimage.maximum_filter(H, size=(1, 3)))
+            # Range 门限
+            r_min, r_max = params.get('cfar_range_min', 2), params.get('cfar_range_max', 20)
+            mask[:r_min, :] = False
+            mask[r_max:, :] = False
+
+            hit_indices = np.argwhere(mask)
+            detected_points = []
+            for r_idx, a_idx in hit_indices:
+                dist = ranges_m[r_idx]
+                az_deg = angles_deg[a_idx]
+                calib_mode = params.get('aoa_calib_mode', 'linear')
+                if calib_mode in ('linear', 'both'):
+                    az_deg = az_deg * params.get('aoa_scale', 1.0) + params.get('aoa_offset_deg', 0.0)
+                az_rad = np.deg2rad(np.clip(az_deg, -90, 90))
+                point_x = dist * np.sin(az_rad)
+                point_y = -dist * np.cos(az_rad)
+                snr = 10 * np.log10(H[r_idx, a_idx] / (noise_avg[r_idx, a_idx] + 1e-12))
+                detected_points.append({
+                    'pos': (-point_x, point_y),
+                    'snr': snr,
+                    'time': time.time(),
+                    'range_idx': int(r_idx),
+                    'azimuth_idx': int(a_idx),
+                })
+        else:  # 'two_pass'
+            detected_points = self._two_pass_cfar(H, params)
+
+        # 3. 每个检出点计算速度 (论文 Eq.15)
+        for pt in detected_points:
+            k = pt['range_idx']
+            i = pt['azimuth_idx']
+            sv = self._capon_sv[:, i].reshape(-1, 1)
+            R_inv = R_inv_list[k]
+            if R_inv is not None:
+                w = R_inv @ sv / np.real(sv.conj().T @ R_inv @ sv)
+                y = w.conj().T @ A_all[:, k, :]
+            else:
+                y = sv.conj().T @ A_all[:, k, :]
+            y = y.flatten()
+            L_chirps = len(y)
+            dop_spec = np.abs(np.fft.fft(y)) ** 2
+            half = L_chirps // 2
+            d_peak = np.argmax(dop_spec[:half])
+            snapshot_rate = self.config.snapshot_rate
+            wavelength = 2.99792458e8 / params['center_freq']
+            v_res = wavelength * snapshot_rate / (2.0 * L_chirps)
+            pt['velocity'] = float(d_peak * v_res)
+
+        # 4. Breathing
+        val_breath = 0.0
+        try:
+            all_a = self.dm.get_all_snapshot_as_array('abs')
+            if all_a is not None and all_a.shape[3] >= params['snapshots']:
+                dop_tx = params.get('doppler_tx', 1)
+                dop_rx = params.get('doppler_rx', 6)
+                tx_idx = self.config.udp_tx_list.index(dop_tx)
+                rx_idx = self.config.udp_rx_list.index(dop_rx)
+                recent_a = all_a[rx_idx, tx_idx, :, -params['snapshots']:]
+                val_breath, _, _, _ = find_breathing_feature(
+                    np.fft.fft(recent_a, axis=1),
+                    self.config.snapshot_rate, 0.15, 0.7, 0, 16)
+                if self.breathing_window.maxlen != 10:
+                    self.breathing_window = deque(list(self.breathing_window), maxlen=10)
+                self.breathing_window.append(val_breath)
+        except:
+            pass
+
+        return {
+            "detected_points": detected_points,
+            "params": params,
+            "breath_val": float(val_breath),
+        }
+
+    def step_ra_heatmap_view(self):
+        """
+        Range-Azimuth 热力图可视化 (Capon):
+          与 RA-CFAR 共用参数和 _compute_ra_heatmap, 但不做 CFAR 检测.
+          返回热力图数据供 plot_panel 显示为 imshow.
+        """
+        params = self.config.algo_params['RA-CFAR']
+        H, ranges_m, angles_deg, _, _ = self._compute_ra_heatmap(params)
+        if H is None:
+            return None
+        # dB 尺度更直观
+        H_db = 10 * np.log10(H + 1e-12)
+        return {
+            'heatmap': H_db,
+            'ranges_m': ranges_m,
+            'angles_deg': angles_deg,
+            'params': params,
         }
 
     # ===== Multipass CFAR (IEEE Sensors Journal 2024) helpers =====
@@ -1450,6 +1737,130 @@ class AlgorithmProcessor:
             return self._capon_angle_response(phase_vec, params, angles_rad)
         else:  # MUSIC
             return self._music_angle_response(phase_vec, params, angles_rad)
+
+    def _angle_cfar_detect(self, spectrum, angles, params):
+        """
+        角度维 1D CA-CFAR: 沿角度维度滑窗, 用局部训练单元估计噪声,
+        对每个角度 bin 判断是否超过 CFAR 阈值.
+
+        参数:
+            spectrum: 1D array, 角度响应功率谱 (线性值)
+            angles:   1D array, 对应的角度值 (弧度)
+            params:   算法参数字典
+
+        返回:
+            List[float]: 检出的角度列表 (弧度), 按功率降序排列
+        """
+        N = len(spectrum)
+        guard = params.get('aoa_cfar_guard', 4)
+        train = params.get('aoa_cfar_train', 8)
+        threshold_db = params.get('aoa_cfar_threshold_db', 10.0)
+        threshold_linear = 10 ** (threshold_db / 10.0)
+
+        # 对每个角度 bin 做 CFAR
+        mask = np.zeros(N, dtype=bool)
+        for k in range(N):
+            # 左侧训练单元: [k - guard - train, k - guard)
+            lo_L = max(0, k - guard - train)
+            hi_L = max(0, k - guard)
+            # 右侧训练单元: [k + guard + 1, k + guard + train + 1)
+            lo_R = min(N, k + guard + 1)
+            hi_R = min(N, k + guard + train + 1)
+
+            left_cells = spectrum[lo_L:hi_L]
+            right_cells = spectrum[lo_R:hi_R]
+            if len(left_cells) + len(right_cells) == 0:
+                continue
+
+            noise_est = (np.sum(left_cells) + np.sum(right_cells)) / (
+                len(left_cells) + len(right_cells))
+            if noise_est < 1e-12:
+                noise_est = 1e-12
+
+            if spectrum[k] > noise_est * threshold_linear:
+                mask[k] = True
+
+        # 合并相邻检出 (属于同一个主瓣) — 取每个连续段中功率最大的
+        if not np.any(mask):
+            return [angles[np.argmax(spectrum)]]  # 回退到最强峰
+
+        # 按功率排序, 把最强峰放前面
+        hit_indices = np.argwhere(mask).flatten()
+        hit_powers = spectrum[hit_indices]
+        sorted_idx = hit_indices[np.argsort(hit_powers)[::-1]]
+
+        # 去重: 合并间距 < guard 的检出
+        kept = [sorted_idx[0]]
+        for idx in sorted_idx[1:]:
+            if all(abs(idx - k) >= guard for k in kept):
+                kept.append(idx)
+
+        return [angles[k] for k in kept]
+
+    def _find_angle_peaks(self, spectrum, angles, params):
+        """
+        在角度响应谱上做多峰检测, 替代 argmax 单峰.  (保留作为 fallback)
+
+        两层过滤:
+          第1层 find_peaks: 低阈值噪声门, 只过滤纯噪声波动
+          第2层 手动dB检查: 峰顶/鞍部 vs prominence_db, 与噪底无关
+        """
+        if not params.get('aoa_multi_peak_en', False) or len(spectrum) < 3:
+            return [angles[np.argmax(spectrum)]]
+
+        # 噪底估计 (低百分位数, 仅用于噪声门)
+        pct = params.get('aoa_noise_pct', 20)
+        noise_floor = np.percentile(spectrum, pct)
+        if noise_floor < 1e-12:
+            noise_floor = 1e-12
+
+        prominence_db = params.get('aoa_peak_prominence_db', 8.0)
+        min_sep_deg = params.get('aoa_peak_min_sep_deg', 15.0)
+        angle_span_deg = np.rad2deg(angles[-1] - angles[0])
+        n_bins = len(angles)
+        distance = max(1, int(min_sep_deg / angle_span_deg * n_bins))
+        max_count = params.get('aoa_peak_max_count', 3)
+
+        # === 第1层: 噪声门 ===
+        # 用低的绝对 prominence, 只过滤纯噪声波动 (~5dB above noise)
+        prominence_gate = noise_floor * 3.0
+        peaks, props = signal.find_peaks(
+            spectrum,
+            height=noise_floor * 2.0,
+            prominence=prominence_gate,
+            distance=distance,
+        )
+
+        if len(peaks) == 0:
+            return [angles[np.argmax(spectrum)]]
+
+        # === 第2层: 真实 dB 比值检查 ===
+        # prominence_db 衡量: 峰顶功率 ÷ 连接更高峰的鞍部功率
+        # 这个比值只取决于峰和鞍部的相对关系, 与全局噪底无关
+        sorted_idx = np.argsort(spectrum[peaks])[::-1]
+        kept = [peaks[sorted_idx[0]]]  # 最强峰无条件保留
+
+        for pi in sorted_idx[1:]:
+            p = peaks[pi]
+            pwr_peak = spectrum[p]
+
+            # 找到连接此峰到任意已保留更高峰的鞍部 (区间最低点)
+            saddle = pwr_peak
+            for hp in kept:
+                lo, hi = (p, hp) if p < hp else (hp, p)
+                if hi - lo >= 2:
+                    saddle = min(saddle, np.min(spectrum[lo:hi+1]))
+
+            if saddle > 1e-12:
+                ratio_db = 10.0 * np.log10(pwr_peak / saddle)
+            else:
+                ratio_db = 99.0
+
+            if ratio_db >= prominence_db:
+                kept.append(p)
+
+        kept = kept[:max_count]
+        return [angles[p] for p in kept]
 
     def _fft_angle_response(self, phase_vec, params, angles_rad):
         """FFT-based 角度响应: Bartlett BF in fine angular grid"""
@@ -1858,38 +2269,324 @@ class AlgorithmProcessor:
             calib = np.exp(1j * calib_phase[channels])
             self._dbf_sv = self._dbf_sv * calib[:, np.newaxis]
 
+    def _init_capon_steering(self, params):
+        """预计算 Capon 导向矢量矩阵, 与 calculate_capon_aoa 完全对齐"""
+        ant_x, channels = self._get_capon_antenna_x(params)
+        # 相位校准因子 (与 calculate_capon_aoa 一致)
+        if params.get('ant_calib_en', False):
+            calib_phase = np.array(params.get('ant_calib_phase',
+                                  [0.0] * 8), dtype=np.float64)
+            calib_sv = np.exp(1j * calib_phase[channels]).reshape(-1, 1)
+        else:
+            calib_sv = np.ones((len(channels), 1), dtype=np.complex64)
+
+        azi_deg = np.linspace(params['azi_angle_range'][0],
+                              params['azi_angle_range'][1],
+                              params['azimuth_num'])
+        self._capon_angles = np.deg2rad(azi_deg)
+        # sv = exp(1j * 2π * ant_x * sin(θ))  ← 与 calculate_capon_aoa 完全一致
+        self._capon_sv = np.exp(1j * 2 * np.pi *
+                                ant_x[:, np.newaxis] * np.sin(self._capon_angles[np.newaxis, :]))
+        # sv = sv * calib_sv  ← 与 calculate_capon_aoa 一致
+        self._capon_sv = self._capon_sv * calib_sv
+
+    def _compute_ra_heatmap(self, params):
+        """
+        计算 Range-Azimuth 热力图 (Bartlett/DBF, 多chirp协方差).
+
+        与论文 Section III 对齐:
+          - 不做 Doppler FFT
+          - 每个 range bin 用全部 chirp 构造协方差矩阵 R_k (P×P)
+          - Bartlett 波束形成: H(k,θ) = a(θ)^H · R_k · a(θ)
+          → 等价于每 chirp 分别 DBF 后跨 chirp 平均功率
+          → SNR 增益 ~10log10(L) vs 单 chirp
+
+        返回:
+          H:         (K, I) 功率热力图 (线性值)
+          ranges_m:  (K,) 距离数组 (米)
+          angles_deg:(I,) 角度数组 (度)
+        """
+        all_c = self.dm.get_all_snapshot_as_array('complex')
+        if all_c is None:
+            return None, None, None
+
+        N_snaps = params['snapshots']
+        cir_comb = params.get('cir_combine_num', 1)
+        leakage_offset = params['leakage_offset']
+        current_cube = all_c[:, :, :, -N_snaps:]
+
+        # 预处理
+        if cir_comb > 1:
+            n_comb = current_cube.shape[3] // cir_comb
+            trim = n_comb * cir_comb
+            current_cube = current_cube[:, :, :, :trim] \
+                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
+        current_cube = np.roll(current_cube, -leakage_offset, axis=2)
+
+        # 展平 8 通道 → 选 4 通道
+        # current_cube: (4 RX, 2 TX, 32 range, L chirps)
+        cube_flat = current_cube.transpose(1, 0, 2, 3).reshape(
+            8, current_cube.shape[2], current_cube.shape[3])
+        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
+        A_all = cube_flat[valid_indices, :, :]  # (4, 32, L)
+
+        # 初始化 Capon 导向矢量 (用真实天线位置, 非 ULA 假设)
+        if getattr(self, '_capon_sv', None) is None:
+            self._init_capon_steering(params)
+        I = len(self._capon_angles)
+        K = A_all.shape[1]
+        L = A_all.shape[2]
+
+        # 对每个 range bin: Capon 波束形成 (论文 Eq.11-13)
+        # R_k = A_k·A_k^H / L + βI,  H(k,θ) = 1 / Re(a(θ)^H · R_k^{-1} · a(θ))
+        diag_load = params.get('capon_diag_load', 1e-3)
+        H = np.zeros((K, I), dtype=np.float64)
+        R_inv_list = []
+        for k_idx in range(K):
+            A_k = A_all[:, k_idx, :]
+            R_k = (A_k @ A_k.conj().T) / L
+            R_k += np.eye(4) * diag_load * np.abs(np.trace(R_k))
+            try:
+                R_inv = np.linalg.inv(R_k)
+            except np.linalg.LinAlgError:
+                R_inv_list.append(None)
+                continue
+            R_inv_list.append(R_inv)
+            denom = np.sum((self._capon_sv.conj() * (R_inv @ self._capon_sv)), axis=0)
+            H[k_idx, :] = 1.0 / np.real(np.clip(denom, 1e-12, None))
+
+        ranges_m = np.arange(K) * params['dist_per_tap']
+        angles_deg = np.rad2deg(self._capon_angles)
+        return H, ranges_m, angles_deg, A_all, R_inv_list
+
+    def _two_pass_cfar(self, H, params):
+        """
+        Algorithm 1: Two-Pass CFAR (论文 IEEE JSEN 2024)
+
+        Pass 1 — Range-wise: 沿 range 维度对每个 azimuth bin 做 1D CFAR.
+        Pass 2 — Azimuth-wise: 只对 Pass1 有检出的 range bin, 沿 azimuth 维做 1D CFAR.
+
+        参数 (来自 params):
+          pass1_N_W_R, pass1_N_G_R, pass1_N_ave_R, pass1_gamma_R_db
+          pass2_N_W_phi, pass2_N_G_phi, pass2_gamma_phi_db
+
+        返回:
+          detections: List[dict], 每个检出包含 {range_idx, azimuth_idx, range_m, angle_deg, power}
+        """
+        K, I = H.shape  # K=range bins, I=azimuth bins
+        debug = params.get('aoa_debug_print', False)
+
+        # ─── Pass 1: Range-wise CFAR ───
+        N_W_R = params.get('pass1_N_W_R', 3)
+        N_G_R = params.get('pass1_N_G_R', 1)
+        N_ave_R = params.get('pass1_N_ave_R', 2)
+        gamma_R_db = params.get('pass1_gamma_R_db', 10.0)
+        gamma_R = 10 ** (gamma_R_db / 10.0)
+        N_WG_R = N_W_R + N_G_R
+
+        C = np.zeros((K, I), dtype=bool)
+
+        for i in range(I):
+            # 边界 padding: 取首尾 N_ave_R 个 range bin 的均值
+            mu_L = np.mean(H[:N_ave_R, i]) if N_ave_R > 0 else H[0, i]
+            mu_R = np.mean(H[K - N_ave_R:, i]) if N_ave_R > 0 else H[-1, i]
+
+            # 构造 padded 向量: [mu_L (×N_WG_R), H[:,i], mu_R (×N_WG_R)]
+            H_pad = np.concatenate([
+                np.full(N_WG_R, mu_L),
+                H[:, i],
+                np.full(N_WG_R, mu_R)
+            ])
+            K_prime = len(H_pad)
+
+            for k in range(K):
+                # μ_L = 左侧训练单元均值 (在 H_pad 中的索引)
+                lo_L = k
+                hi_L = k + N_W_R
+                # μ_R = 右侧训练单元均值
+                lo_R = k + 2 * N_G_R + N_W_R + 1
+                hi_R = k + 2 * N_G_R + 2 * N_W_R + 1
+                if hi_R > K_prime:
+                    hi_R = K_prime
+                    lo_R = max(0, hi_R - N_W_R)
+
+                mu_L_val = np.mean(H_pad[lo_L:hi_L]) if hi_L > lo_L else 0.0
+                mu_R_val = np.mean(H_pad[lo_R:hi_R]) if hi_R > lo_R else np.inf
+                W_R = min(mu_L_val, mu_R_val)
+
+                if W_R > 1e-12 and H[k, i] > gamma_R * W_R:
+                    C[k, i] = True
+
+        if debug:
+            n_pass1 = np.sum(C)
+            print(f"[RA-CFAR] Pass1 (Range): {n_pass1} detections across {K}×{I} cells")
+
+        # ─── Pass 2: Azimuth-wise CFAR ───
+        N_W_phi = params.get('pass2_N_W_phi', 4)
+        N_G_phi = params.get('pass2_N_G_phi', 2)
+        gamma_phi_db = params.get('pass2_gamma_phi_db', 10.0)
+        gamma_phi = 10 ** (gamma_phi_db / 10.0)
+        N_WG_phi = N_W_phi + N_G_phi
+
+        for k in range(K):
+            # 只对有 Pass1 检出的 range bin 做 Pass2
+            if not np.any(C[k, :]):
+                continue
+
+            # 循环 padding: 首尾各取 N_WG_phi 个 azimuth bin 环绕
+            # H_pad = [H[k, I-N_WG_phi : I-1], H[k, 0 : I-1], H[k, 0 : N_WG_phi-1]]
+            # 对应伪代码: 末尾取最后一个 elevation 角度的, 前面取第一个 elevation 的
+            # 我们 M=1, 简化为自身的循环 padding
+            pad_left = H[k, I - N_WG_phi:I]   # 末尾 N_WG_phi 个
+            pad_right = H[k, :N_WG_phi]       # 开头 N_WG_phi 个
+            H_pad_phi = np.concatenate([pad_left, H[k, :], pad_right])
+            I_prime = len(H_pad_phi)
+
+            for i in range(I):
+                # 在 H_pad_phi 中, 原始 H[k,i] 对应索引 i + N_WG_phi
+                # μ_L = 左侧训练单元
+                lo_L = i
+                hi_L = i + N_W_phi
+                # μ_R = 右侧训练单元
+                lo_R = i + 2 * N_G_phi + N_W_phi + 1
+                hi_R = i + 2 * N_G_phi + 2 * N_W_phi + 1
+                if hi_R > I_prime:
+                    hi_R = I_prime
+                    lo_R = max(0, hi_R - N_W_phi)
+
+                mu_L_val = np.mean(H_pad_phi[lo_L:hi_L]) if hi_L > lo_L else 0.0
+                mu_R_val = np.mean(H_pad_phi[lo_R:hi_R]) if hi_R > lo_R else np.inf
+                W_phi = min(mu_L_val, mu_R_val)
+
+                if W_phi > 1e-12 and H[k, i] > gamma_phi * W_phi:
+                    # 已经通过 Pass1, 再通过 Pass2 → 确认检出
+                    pass
+                else:
+                    C[k, i] = False  # Pass2 未通过 → 撤销
+
+        if debug:
+            n_pass2 = np.sum(C)
+            print(f"[RA-CFAR] Pass2 (Azimuth): {n_pass2} final detections")
+
+        # ─── 组装检出结果 ───
+        ranges_m = np.arange(K) * params['dist_per_tap']
+        angles_deg = np.rad2deg(self._capon_angles)
+
+        detections = []
+        hit_indices = np.argwhere(C)
+        for k, i in hit_indices:
+            dist = ranges_m[k]
+            az_deg = angles_deg[i]
+            # 校准
+            calib_mode = params.get('aoa_calib_mode', 'linear')
+            if calib_mode in ('linear', 'both'):
+                az_deg = az_deg * params.get('aoa_scale', 1.0) + params.get('aoa_offset_deg', 0.0)
+            az_rad = np.deg2rad(np.clip(az_deg, -90, 90))
+            point_x = dist * np.sin(az_rad)
+            point_y = -dist * np.cos(az_rad)
+            detections.append({
+                'pos': (-point_x, point_y),
+                'snr': 10 * np.log10(H[k, i] + 1e-12),
+                'time': time.time(),
+                'range_idx': int(k),
+                'azimuth_idx': int(i),
+            })
+
+        return detections
+
     def _dbf_estimate(self, phase_vec, params):
-        """DBF 方位角估计，返回弧度（含线性校准）"""
+        """DBF 方位角估计，返回角度列表 (弧度) — 支持多峰检测"""
+        debug = params.get('aoa_debug_print', False)
         x = phase_vec.reshape(-1, 1)
         pwr = np.abs(self._dbf_sv.conj().T @ x) ** 2
         pwr = pwr.flatten()
-        peak_idx = np.argmax(pwr)
-        az = self._dbf_angles[peak_idx]
 
-        # 主瓣滤波
+        if debug:
+            # --- 诊断打印: 相位向量 ---
+            ch_mag = np.abs(phase_vec)
+            ch_phase = np.angle(phase_vec, deg=True)
+            print(f"\n{'='*60}")
+            print(f"[DBF DEBUG] 4通道相位向量:")
+            for i in range(len(phase_vec)):
+                print(f"  ch[{i}]: mag={ch_mag[i]:.4f} ({20*np.log10(ch_mag[i]+1e-12):.1f} dB), "
+                      f"phase={ch_phase[i]:.1f}°")
+            # --- 诊断打印: 角度谱概览 ---
+            med = np.median(pwr)
+            pct20 = np.percentile(pwr, 20)
+            top_idx = np.argmax(pwr)
+            print(f"[DBF DEBUG] 角度谱概览 (64 bins, -70°~70°):")
+            print(f"  最强峰: θ={np.rad2deg(self._dbf_angles[top_idx]):.1f}°, "
+                  f"power={pwr[top_idx]:.2f} ({10*np.log10(pwr[top_idx]+1e-12):.1f} dB linear)")
+            print(f"  noise_floor: median={med:.2f}, 20%ile={pct20:.2f}")
+            # 列出所有局部峰 (手动扫一遍, 不依赖 find_peaks)
+            all_local_peaks = []
+            for j in range(2, len(pwr)-2):
+                if pwr[j] > pwr[j-1] and pwr[j] > pwr[j-2] and pwr[j] > pwr[j+1] and pwr[j] > pwr[j+2]:
+                    all_local_peaks.append((np.rad2deg(self._dbf_angles[j]), pwr[j]))
+            all_local_peaks.sort(key=lambda v: -v[1])
+            print(f"  所有局部峰 (前5个):")
+            for deg, val in all_local_peaks[:5]:
+                print(f"    θ={deg:+.1f}°, power={val:.2f} ({10*np.log10(val+1e-12):.1f} dB)")
+
+        # 多峰检测: 优先走角度CFAR, 否则 fallback 到 prominence 寻峰
+        if params.get('aoa_cfar_en', False):
+            az_list = self._angle_cfar_detect(pwr, self._dbf_angles, params)
+        else:
+            az_list = self._find_angle_peaks(pwr, self._dbf_angles, params)
+        n_azi = len(self._dbf_angles)
+
+        # 主瓣滤波 (dbf_diff): 对每个峰独立检查
         dbf_diff = params.get('dbf_diff', 0)
         if dbf_diff > 0:
-            n_azi = len(self._dbf_angles)
-            guard = max(3, n_azi // 16)
-            side_mask = np.ones(n_azi, dtype=bool)
-            lo = max(0, peak_idx - guard)
-            hi = min(n_azi, peak_idx + guard + 1)
-            side_mask[lo:hi] = False
-            side_pwr = np.mean(pwr[side_mask]) if np.any(side_mask) else 0.0
-            if side_pwr > 1e-12:
-                ratio_db = 10 * np.log10(pwr[peak_idx] / side_pwr)
-                if ratio_db < dbf_diff:
-                    return 0.0
+            filtered = []
+            for az in az_list:
+                peak_idx = np.argmin(np.abs(self._dbf_angles - az))
+                guard = max(3, n_azi // 16)
+                side_mask = np.ones(n_azi, dtype=bool)
+                lo = max(0, peak_idx - guard)
+                hi = min(n_azi, peak_idx + guard + 1)
+                side_mask[lo:hi] = False
+                side_pwr = np.mean(pwr[side_mask]) if np.any(side_mask) else 0.0
+                if side_pwr > 1e-12:
+                    ratio_db = 10 * np.log10(pwr[peak_idx] / side_pwr)
+                    if ratio_db >= dbf_diff:
+                        filtered.append(az)
+                else:
+                    filtered.append(az)
+            az_list = filtered
 
-        # 校准模式选择
+        if debug:
+            print(f"[DBF DEBUG] _find_angle_peaks 返回 (dbf_diff前): "
+                  f"{[f'{np.rad2deg(a):.1f}°' for a in az_list]}")
+            # 打印 dbf_diff 过滤细节
+            if dbf_diff > 0:
+                print(f"[DBF DEBUG] dbf_diff={dbf_diff}dB 过滤后: "
+                      f"{[f'{np.rad2deg(a):.1f}°' for a in az_list]}")
+
+        if len(az_list) == 0:
+            if debug:
+                print(f"[DBF DEBUG] 所有峰被过滤! 返回 0.0°")
+            return [0.0]
+
+        # 校准: 对每个角度应用
         calib_mode = params.get('aoa_calib_mode', 'linear')
-        if calib_mode in ('linear', 'both'):
-            offset_deg = params.get("aoa_offset_deg", 0.0)
-            scale = params.get("aoa_scale", 1.0)
-            offset_rad = np.deg2rad(offset_deg)
-            az = (az * scale) + offset_rad
-        az = np.clip(az, -np.pi / 2, np.pi / 2)
-        return az
+        offset_deg = params.get("aoa_offset_deg", 0.0)
+        scale = params.get("aoa_scale", 1.0)
+        offset_rad = np.deg2rad(offset_deg)
+
+        result = []
+        for az in az_list:
+            if calib_mode in ('linear', 'both'):
+                az = (az * scale) + offset_rad
+            az = np.clip(az, -np.pi / 2, np.pi / 2)
+            result.append(az)
+
+        if debug:
+            print(f"[DBF DEBUG] 最终输出 (校准后): "
+                  f"{[f'{np.rad2deg(a):.1f}°' for a in result]}")
+            print(f"{'='*60}\n")
+
+        return result  # List[float]
 
     def step_point_cloud_dubhe(self):
         """
@@ -2003,19 +2700,20 @@ class AlgorithmProcessor:
 
             phase_vec = rd_flat[siso_ch, r_idx, d_idx]
             if aoa_method == 'DBF':
-                az_angle = self._dbf_estimate(phase_vec, params)
+                az_list = self._dbf_estimate(phase_vec, params)
             else:
-                az_angle = self.estimate_aoa(phase_vec, params)
+                az_list = self.estimate_aoa(phase_vec, params)
 
             dist = r_fine * params['dist_per_tap']
-            point_x = dist * np.sin(az_angle)
-            point_y = -dist * np.cos(az_angle)
             snr_val = snr_map[r_idx, d_idx]
-            detected_points.append({
-                'pos': (point_x, point_y),
-                'snr': snr_val,
-                'time': time.time()
-            })
+            for az_angle in az_list:
+                point_x = dist * np.sin(az_angle)
+                point_y = -dist * np.cos(az_angle)
+                detected_points.append({
+                    'pos': (point_x, point_y),
+                    'snr': snr_val,
+                    'time': time.time()
+                })
 
         # --- Phase 13: Breathing ---
         val_breath = 0.0
@@ -2398,7 +3096,7 @@ class PlotPanel(tk.Frame):
                 ax3.add_patch(plt.Rectangle((-0.65, -1.8), 1.3, 1.8, ec='blue', fc='none', lw=2))
             else: ax3.set_rmax(3.5); ax3.set_theta_zero_location('S')
             self.axes = {'music': ax1, 'dop': ax2, 'fus': ax3}
-        elif mode in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER'):
+        elif mode in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER', 'RA-CFAR'):
             ax = self.figure.add_subplot(111)
             ax.set_xlim(-params.get('plot_xlim', 1.5), params.get('plot_xlim', 1.5))
             ax.set_ylim(params.get('plot_ylim_min', -2.5), params.get('plot_ylim_max', 0))
@@ -2407,16 +3105,51 @@ class PlotPanel(tk.Frame):
                 'POINT-CLOUD-OPTIMIZED': "Vehicle Occupancy Point Cloud (Optimized)",
                 'POINT-CLOUD-DUBHE': "Vehicle Occupancy Point Cloud (Dubhe CPD)",
                 'POINT-CLOUD-PAPER': "Vehicle Occupancy Point Cloud (Multipass CFAR, IEEE JSEN'24)",
+                'RA-CFAR': "Vehicle Occupancy (Range-Azimuth Two-Pass CFAR)",
             }
             ax.set_title(mode_titles.get(mode, "Point Cloud"))
             ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
             ax.grid(True, linestyle=':', alpha=0.6)
             self.plots['pc_scatter'] = ax.scatter([], [], c=[], cmap='cool', s=30, alpha=0.8)
-            # 优先从 SEAT-OCCUPANCY 配置读取椭圆, 回退到原有硬编码
             occ_params = params.copy()
             occ_params['occupancy_config'] = params.get('occupancy_config', None)
             self._draw_seating_ellipses(ax, occ_params)
             self.axes['main'] = ax
+        elif mode == 'RA-HEATMAP':
+            ax = self.figure.add_subplot(111)
+            ax.set_title("Capon Range-Azimuth Heatmap")
+            ax.set_xlabel("Azimuth (°)")
+            ax.set_ylabel("Range (m)")
+            self.plots['ra_hm'] = ax.imshow(
+                np.zeros((32, 64)), aspect='auto', origin='lower',
+                cmap='jet', interpolation='bilinear')
+            self.axes['main'] = ax
+        elif mode == 'ANGLE-SPECTRUM':
+            gs = self.figure.add_gridspec(1, 2, width_ratios=[3, 1])
+            ax_as = self.figure.add_subplot(gs[0, 0])
+            ax_rd = self.figure.add_subplot(gs[0, 1])
+
+            # 左: 角度谱曲线图 (每个 CFAR 检出 bin 一条曲线)
+            ax_as.set_title("DBF Angle Spectrum (CFAR detections)")
+            ax_as.set_xlabel("Angle (°)")
+            ax_as.set_ylabel("Power (dB)")
+            ax_as.grid(True, linestyle=':', alpha=0.5)
+            ax_as.set_xlim(-70, 70)
+            # 曲线和峰值标记用空列表初始化, update_data 里动态更新
+            self.plots['as_curves'] = []   # 角度谱曲线列表
+            self.plots['as_peaks'] = []    # 峰值标记列表
+            self.plots['as_labels'] = []   # 图例标签列表
+
+            # 右: Range-Doppler 功率图 (看 CFAR 在哪些 bin 检出了目标)
+            ax_rd.set_title("Range-Doppler (CFAR hits)")
+            ax_rd.set_xlabel("Doppler bin")
+            ax_rd.set_ylabel("Range bin")
+            self.plots['rd_im'] = ax_rd.imshow(
+                np.zeros((32, 64)), aspect='auto', origin='lower',
+                cmap='jet', interpolation='bilinear'
+            )
+
+            self.axes = {'as': ax_as, 'rd': ax_rd}
         self.canvas.draw()
 
 
@@ -2476,7 +3209,7 @@ class PlotPanel(tk.Frame):
                 else: self.plots['tgt'].set_data([tx], [ty])
             else: self.plots['tgt'].set_data([], [])
             self.axes['fus'].set_title(f"Breath: {data['breath_val']:.2f} | Motion: {data['max_motion']:.2f}")
-        elif mode in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER'):
+        elif mode in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER', 'RA-CFAR'):
             if not data or 'detected_points' not in data: return
             p = data['params']
             breath_val = data.get('breath_val', 0.0)
@@ -2485,8 +3218,12 @@ class PlotPanel(tk.Frame):
                 'POINT-CLOUD-OPTIMIZED': "Vehicle Occupancy Point Cloud (Optimized)",
                 'POINT-CLOUD-DUBHE': "Vehicle Occupancy Point Cloud (Dubhe CPD)",
                 'POINT-CLOUD-PAPER': "Vehicle Occupancy Point Cloud (Multipass CFAR, IEEE JSEN'24)",
+                'RA-CFAR': "Vehicle Occupancy (Range-Azimuth Two-Pass CFAR)",
             }
             base_title = mode_titles.get(mode, "Point Cloud")
+            # RA-CFAR 不需要历史点轨迹, 直接替换
+            if mode == 'RA-CFAR':
+                self.pc_history.clear()
             info_text = f"Breath: {breath_val:.3f}"
             if 'filename' in data:
                 self.axes['main'].set_title(f"{base_title} ({info_text})\nFile: {data['filename']}", fontsize=10)
@@ -2536,6 +3273,73 @@ class PlotPanel(tk.Frame):
                     self.axes['main'].set_title(f"{current_title}\n{occ_title}")
 
             self.canvas.draw_idle() # 使用 draw_idle 提高响应速度
+        elif mode == 'RA-HEATMAP':
+            H_db = data['heatmap']
+            ranges_m = data['ranges_m']
+            angles_deg = data['angles_deg']
+            self.plots['ra_hm'].set_data(H_db)
+            self.plots['ra_hm'].set_extent([angles_deg[0], angles_deg[-1],
+                                            ranges_m[0], ranges_m[-1]])
+            vmin = max(-40, np.percentile(H_db, 5))
+            vmax = np.max(H_db)
+            self.plots['ra_hm'].set_clim(vmin=vmin, vmax=vmax)
+            self.axes['main'].set_title(
+                f"Capon Range-Azimuth Heatmap | vmax={vmax:.1f}dB")
+            self.canvas.draw_idle()
+        elif mode == 'ANGLE-SPECTRUM':
+            spectra = data['spectra']
+            power_map = data['power_map']
+
+            # 左: 角度谱曲线 —— 清除旧曲线, 重新画
+            ax = self.axes['as']
+            for line in self.plots['as_curves']:
+                line.remove()
+            for pk in self.plots['as_peaks']:
+                pk.remove()
+            for txt in self.plots['as_labels']:
+                txt.remove()
+            self.plots['as_curves'] = []
+            self.plots['as_peaks'] = []
+            self.plots['as_labels'] = []
+
+            colors = plt.cm.tab10(np.linspace(0, 1, max(1, len(spectra))))
+            for i, sp in enumerate(spectra):
+                line, = ax.plot(sp['angles_deg'], sp['pwr_db'],
+                                color=colors[i], alpha=0.8, linewidth=1.5)
+                self.plots['as_curves'].append(line)
+
+                # 标记最强峰位置
+                peak_idx = np.argmax(sp['pwr_linear'])
+                peak_angle = sp['angles_deg'][peak_idx]
+                peak_pwr_db = sp['pwr_db'][peak_idx]
+                pk, = ax.plot(peak_angle, peak_pwr_db, 'x',
+                              color=colors[i], markersize=10, mew=2)
+                self.plots['as_peaks'].append(pk)
+
+                # 标签: 距离 + SNR
+                label = ax.annotate(
+                    f"R={sp['range_m']:.2f}m\nθ={peak_angle:.1f}°\n{sp['snr_db']:.1f}dB",
+                    xy=(peak_angle, peak_pwr_db),
+                    xytext=(10, 10), textcoords='offset points',
+                    fontsize=7, color=colors[i],
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+                self.plots['as_labels'].append(label)
+
+            n_det = len(spectra)
+            ax.set_title(f"DBF Angle Spectrum ({n_det} CFAR detection{'s' if n_det>1 else ''})")
+            # 动态 y 轴范围
+            if spectra:
+                all_db = np.concatenate([s['pwr_db'] for s in spectra])
+                y_min = max(-40, np.percentile(all_db, 5) - 5)
+                y_max = np.max(all_db) + 3
+                ax.set_ylim(y_min, y_max)
+
+            # 右: Range-Doppler 参考图
+            self.plots['rd_im'].set_data(power_map)
+            if np.max(power_map) > 0:
+                self.plots['rd_im'].set_clim(vmin=0, vmax=np.max(power_map))
+
+            self.canvas.draw_idle()
         self.canvas.draw()
 
     def _draw_seating_ellipses(self, ax, params):
@@ -2796,7 +3600,7 @@ class ControlPanel(tk.Frame):
         row1 = tk.Frame(frm_algo, bg='#f0f0f0')
         row1.pack(fill='x', padx=2)
         tk.Label(row1, text="Algo:", bg='#f0f0f0').pack(side='left')
-        self.cb_algo = ttk.Combobox(row1, values=('PLOT', '2D-MUSIC', 'POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER'), width=22, state='readonly')
+        self.cb_algo = ttk.Combobox(row1, values=('PLOT', '2D-MUSIC', 'POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER', 'RA-CFAR', 'RA-HEATMAP', 'ANGLE-SPECTRUM'), width=22, state='readonly')
         self.cb_algo.set(config.current_algo)
         self.cb_algo.pack(side='left')
         self.cb_algo.bind("<<ComboboxSelected>>", self._on_algo_change)
@@ -3350,13 +4154,15 @@ class App:
                     d = self.algo_processor.step_waveform()
                 elif m == '2D-MUSIC':
                     d = self.algo_processor.step_2d_music()
-                elif m in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER'):
+                elif m in ('POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER', 'RA-CFAR'):
                     if m == 'POINT-CLOUD':
                         d = self.algo_processor.step_point_cloud()
                     elif m == 'POINT-CLOUD-OPTIMIZED':
                         d = self.algo_processor.step_point_cloud_optimized()
                     elif m == 'POINT-CLOUD-PAPER':
                         d = self.algo_processor.step_point_cloud_paper()
+                    elif m == 'RA-CFAR':
+                        d = self.algo_processor.step_point_cloud_ra_cfar()
                     else:
                         d = self.algo_processor.step_point_cloud_dubhe()
 
@@ -3377,6 +4183,11 @@ class App:
                             d.get('detected_points', []))
                         d['occupancy'] = occ
                         d['f_values'] = f_vals
+
+                elif m == 'RA-HEATMAP':
+                    d = self.algo_processor.step_ra_heatmap_view()
+                elif m == 'ANGLE-SPECTRUM':
+                    d = self.algo_processor.step_angle_spectrum_view()
 
                 if d:
                     self.plot_panel.update_data(m, d)
