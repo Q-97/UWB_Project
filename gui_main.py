@@ -5,6 +5,7 @@ from matplotlib import patches
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
 import time
 import json
 import threading
@@ -219,7 +220,7 @@ DEFAULT_ALGO_PARAMS = {
         "music_forward_backward": False,
         "capon_diag_load": 1e-3,
         "ant_dbf_select": [2, 3, 6, 7],
-        "azi_angle_range": [-70, 70],
+        "azi_angle_range": [-90, 90],
         "azimuth_num": 64,
         "dbf_diff": 0,
         "aoa_calib_mode": "linear",
@@ -260,7 +261,7 @@ DEFAULT_ALGO_PARAMS = {
         "noi_edges": [-15, -5, 10, 20],
         "cfar_th_dynamic": [15, 12, 10, 8, 7],
         "ant_dbf_select": [2, 3, 6, 7],
-        "azi_angle_range": [-70, 70],
+        "azi_angle_range": [-90, 90],
         "azimuth_num": 64,
         "dbf_diff": 0,
         "aoa_method": "DBF",
@@ -356,7 +357,7 @@ DEFAULT_ALGO_PARAMS = {
         "doppler_dc_remove": True,
         "indices_azimuth": [2, 3, 6, 7],
         "ant_dbf_select": [2, 3, 6, 7],
-        "azi_angle_range": [-70, 70],
+        "azi_angle_range": [-90, 90],
         "azimuth_num": 64,
         "ant_calib_en": False,
         "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -387,21 +388,56 @@ DEFAULT_ALGO_PARAMS = {
         "aoa_debug_print": False,
     },
 
+    "RA-OCCUPANCY": {
+        # ---- 热力图计算 (与 RA-CFAR 共用 _compute_ra_heatmap) ----
+        "center_freq": 7.9872e9,
+        "snapshots": 64,
+        "cir_combine_num": 1,
+        "leakage_offset": 5,
+        "doppler_window": "chebyshev",
+        "doppler_win_atten": 60,
+        "doppler_dc_remove": True,
+        "indices_azimuth": [2, 3, 6, 7],
+        "ant_dbf_select": [2, 3, 6, 7],
+        "azi_angle_range": [-90, 90],
+        "azimuth_num": 64,
+        "ant_calib_en": False,
+        "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "capon_diag_load": 1e-3,
+        "dist_per_tap": 0.1875,
+        # ---- 可视化 ----
+        "plot_xlim": 1.5,
+        "plot_ylim_min": -2.5,
+        "plot_ylim_max": -0.1,
+        "heatmap_clim_mode": "auto",
+        "heatmap_clim_vmin": -80,
+        "heatmap_clim_vmax": 0,
+    },
+
     "SEAT-OCCUPANCY": {
         "enable": True,
         "seat_type": "4_seats",
         "seats_4": [
-            {"name": "1", "cx": -0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "th": 0.010},
-            {"name": "2", "cx":  0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "th": 0.010},
-            {"name": "3", "cx": -0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "th": 0.005},
-            {"name": "4", "cx":  0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "th": 0.005},
+            {"name": "1", "cx": -0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "th": 0.010,
+             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
+            {"name": "2", "cx":  0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "th": 0.010,
+             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
+            {"name": "3", "cx": -0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "th": 0.005,
+             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
+            {"name": "4", "cx":  0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "th": 0.005,
+             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
         ],
         "seats_5": [
-            {"name": "1", "cx": -0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "th": 0.010},
-            {"name": "2", "cx":  0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "th": 0.010},
-            {"name": "3", "cx": -0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005},
-            {"name": "4", "cx":  0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005},
-            {"name": "5", "cx":  0.00, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005},
+            {"name": "1", "cx": -0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "th": 0.010,
+             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
+            {"name": "2", "cx":  0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "th": 0.010,
+             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
+            {"name": "3", "cx": -0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005,
+             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
+            {"name": "4", "cx":  0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005,
+             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
+            {"name": "5", "cx":  0.00, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005,
+             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
         ],
         "smooth_window": 3,
         "smooth_threshold": 0.5,
@@ -1328,9 +1364,9 @@ class AlgorithmProcessor:
         # 2. 泄漏处理: np.roll 替代截断
         current_cube = np.roll(current_cube, -leakage_offset, axis=2)
 
-        # 3. 慢时间 DC 去除
-        if params.get('doppler_dc_remove', True):
-            current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
+        # # 3. 慢时间 DC 去除
+        # if params.get('doppler_dc_remove', True):
+        #     current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
 
         # 4. 慢时间加窗 (Chebyshev)
         if params.get('doppler_window') == 'chebyshev':
@@ -1461,8 +1497,8 @@ class AlgorithmProcessor:
             current_cube = current_cube[:, :, :, :trim] \
                 .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
         current_cube = np.roll(current_cube, -leakage_offset, axis=2)
-        if params.get('doppler_dc_remove', True):
-            current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
+        # if params.get('doppler_dc_remove', True):
+        #     current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
         if params.get('doppler_window') == 'chebyshev':
             atten = params.get('doppler_win_atten', 60)
             win = chebwin(current_cube.shape[3], at=atten)
@@ -1535,6 +1571,96 @@ class AlgorithmProcessor:
             'params': params,
             'power_map': power_map,
             'n_detections': len(spectra),
+        }
+
+    def step_angle_spectrum_raw(self):
+        """
+        Raw DBF angle spectrum for the first few range bins — no CFAR filtering.
+
+        与 step_angle_spectrum_view 共享完全相同的预处理, 但跳过 CFAR 检测.
+        对前几个 range bin, 各取其最强 doppler bin 的相位向量做 DBF 测角,
+        返回每条 range bin 的完整角度谱曲线 (power vs. angle).
+
+        用途: 观察早期 range bin 的原始 DBF 角度谱形态, 理解无 CFAR 筛选时的测角数据.
+        """
+        all_c = self.dm.get_all_snapshot_as_array('complex')
+        if all_c is None:
+            return None
+
+        params = self.config.algo_params['POINT-CLOUD-OPTIMIZED']
+        N_snaps = params['snapshots']
+        cir_comb = params.get('cir_combine_num', 1)
+        leakage_offset = params['leakage_offset']
+        current_cube = all_c[:, :, :, -N_snaps:]
+
+        # 1-5. 与 step_point_cloud_optimized 完全相同的预处理
+        if cir_comb > 1:
+            n_comb = current_cube.shape[3] // cir_comb
+            trim = n_comb * cir_comb
+            current_cube = current_cube[:, :, :, :trim] \
+                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
+        current_cube = np.roll(current_cube, -leakage_offset, axis=2)
+        # if params.get('doppler_dc_remove', True):
+        #     current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
+        if params.get('doppler_window') == 'chebyshev':
+            atten = params.get('doppler_win_atten', 60)
+            win = chebwin(current_cube.shape[3], at=atten)
+            current_cube = current_cube * win[np.newaxis, np.newaxis, np.newaxis, :]
+        rd_cube = np.fft.fft(current_cube, axis=3)
+
+        # 6. 展平 + 选通道
+        rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
+            8, rd_cube.shape[2], rd_cube.shape[3])
+        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
+        rd_sel = rd_cube_flat[valid_indices, :, :]  # [n_ch, n_range, n_dop]
+
+        # 初始化 DBF 引导矢量
+        if getattr(self, '_dbf_sv', None) is None:
+            self._init_dbf_steering(params)
+        angles_deg = np.rad2deg(self._dbf_angles)
+
+        # 非相干合并功率图 (用于找最强 doppler bin)
+        power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)  # [n_range, n_dop]
+
+        # 选定前几个 range bin (可配置)
+        r_start = params.get('asr_range_start', 2)
+        n_range_bins = params.get('asr_n_range_bins', 8)
+        r_end = min(r_start + n_range_bins, rd_sel.shape[1])
+
+        # 对每个 range bin: 取最强 doppler bin, 做 DBF 角度谱
+        spectra = []
+        for r_idx in range(r_start, r_end):
+            d_idx = np.argmax(power_map[r_idx, :])  # 最强 doppler bin
+
+            phase_vec = rd_sel[:, r_idx, d_idx]
+            x = phase_vec.reshape(-1, 1)
+            pwr = np.abs(self._dbf_sv.conj().T @ x) ** 2
+            pwr = pwr.flatten()
+
+            # 亚 bin 精炼 (可选)
+            r_fine = r_idx
+            if params.get('subbin_refine_en', True):
+                r_fine, _ = self._subbin_refine(power_map, r_idx, d_idx)
+
+            dist = r_fine * params['dist_per_tap']
+            peak_angle = angles_deg[np.argmax(pwr)]
+
+            spectra.append({
+                'angles_deg': angles_deg,
+                'pwr_linear': pwr,
+                'pwr_db': 10 * np.log10(pwr + 1e-12),
+                'range_m': dist,
+                'range_bin': r_idx,
+                'doppler_bin': int(d_idx),
+                'peak_angle': peak_angle,
+            })
+
+        return {
+            'spectra': spectra,
+            'angles_deg': angles_deg,
+            'power_map': 10 * np.log10(power_map + 1e-12),
+            'params': params,
+            'n_range': len(spectra),
         }
 
     def step_point_cloud_ra_cfar(self):
@@ -1653,11 +1779,97 @@ class AlgorithmProcessor:
         if H is None:
             return None
         # dB 尺度更直观
+        H = H -np.sqrt(np.sum(np.square(H)) / (H.shape[0] * H.shape[1]))
         H_db = 10 * np.log10(H + 1e-12)
         return {
-            'heatmap': H_db,
+            'heatmap': H,
             'ranges_m': ranges_m,
             'angles_deg': angles_deg,
+            'params': params,
+        }
+
+    def _seat_ra_energy(self, H, ranges_m, angles_deg, seat):
+        """
+        向量化: 计算 RA 热力图像素中落在座位椭圆内的能量和.
+
+        坐标映射: x = r*sin(θ),  y = -r*cos(θ)
+        椭圆判断: ((x-cx)/rx)² + ((y-cy)/ry)² < 1
+        """
+        r_2d = ranges_m[:, np.newaxis]          # (K, 1)
+        a_2d = np.deg2rad(angles_deg[np.newaxis, :])  # (1, I)
+        x = r_2d * np.sin(a_2d)                 # (K, I)
+        y = -r_2d * np.cos(a_2d)                # (K, I)
+        xn = (x - seat['cx']) / seat['rx']
+        yn = (y - seat['cy']) / seat['ry']
+        mask = (xn * xn + yn * yn) < 1.0
+        return float(np.mean(H[mask]))
+
+    def _ra_to_cartesian(self, H, ranges_m, angles_deg,
+                          x_range=(-3, 3), y_range=(-6, 0), res=0.05):
+        """
+        RA 热力图 polar→Cartesian 重映射.
+        H: (n_range, n_angle) 线性功率
+        返回: H_cart (ny, nx), xs (nx,), ys (ny,)
+        """
+        interp = RegularGridInterpolator(
+            (ranges_m, angles_deg), H,
+            bounds_error=False, fill_value=0.0)
+
+        xs = np.arange(x_range[0], x_range[1] + res, res)
+        ys = np.arange(y_range[0], y_range[1] + res, res)
+        X, Y = np.meshgrid(xs, ys)  # (ny, nx)
+
+        R = np.sqrt(X**2 + Y**2)
+        A = np.rad2deg(np.arctan2(X, -Y))
+
+        pts = np.stack([R.ravel(), A.ravel()], axis=1)
+        H_cart = interp(pts).reshape(len(ys), len(xs))
+        return H_cart, xs, ys
+
+    def step_ra_occupancy(self):
+        """
+        RA热力图占用检测流水线 (无 CFAR, 无点云):
+          1. 计算 Capon RA 热力图 H (复用 _compute_ra_heatmap)
+          2. 背景减除: H_bg = max(H - mean(H²), 0)
+          3. 每座位椭圆内能量求和
+          4. 返回热力图 + 能量字典, 供 App 层做双条件判决+时序平滑
+        """
+        params = self.config.algo_params['RA-OCCUPANCY']
+        H, ranges_m, angles_deg, _, _ = self._compute_ra_heatmap(params)
+        if H is None:
+            return None
+
+        # 背景减除: H_bg = H - mean(H²), clip to >=0
+        H_sq_mean = np.sqrt(np.sum(np.square(H)) / (H.shape[0] * H.shape[1]))
+        # H_sq_mean = np.sum(H) / (H.shape[0] * H.shape[1])
+        H_bg = H - H_sq_mean
+
+        # 每座位能量和
+        occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
+        seat_type = occ_params.get('seat_type', '4_seats')
+        key = 'seats_4' if seat_type == '4_seats' else 'seats_5'
+        seat_defs = occ_params.get(key, occ_params.get('seats_4', []))
+
+        energy_dict = {}
+        for seat in seat_defs:
+            name = seat['name']
+            energy_dict[name] = self._seat_ra_energy(H_bg, ranges_m, angles_deg, seat)
+
+        # Cartesian 重映射 (直接使用背景减除后的 H_bg 线性功率)
+        xlim = params.get('plot_xlim', 1.5)
+        y_min = params.get('plot_ylim_min', -6.0)
+        y_max = params.get('plot_ylim_max', -0.1)
+        H_cart, xs_cart, ys_cart = self._ra_to_cartesian(
+            H_bg, ranges_m, angles_deg,
+            x_range=(-xlim, xlim), y_range=(y_min, y_max), res=0.05)
+
+        return {
+            'heatmap': H_cart,
+            'xs_cart': xs_cart,
+            'ys_cart': ys_cart,
+            'ranges_m': ranges_m,
+            'angles_deg': angles_deg,
+            'energy': energy_dict,
             'params': params,
         }
 
@@ -2319,8 +2531,8 @@ class AlgorithmProcessor:
         if cir_comb > 1:
             n_comb = current_cube.shape[3] // cir_comb
             trim = n_comb * cir_comb
-            current_cube = current_cube[:, :, :, :trim] \
-                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
+            current_cube = current_cube[:, :, :16, :trim] \
+                .reshape(4, 2, 16, n_comb, cir_comb).mean(axis=4)
         current_cube = np.roll(current_cube, -leakage_offset, axis=2)
 
         # 展平 8 通道 → 选 4 通道
@@ -2849,6 +3061,76 @@ class SeatOccupancyDetector:
                  'name': s['name']} for s in self.seats]
 
 
+class RAOccupancyDetector:
+    """
+    RA热力图能量占位检测器 (无 CFAR / 无点云).
+    输入每座椅椭圆内的 Capon 能量和, 双条件判决 + 时序平滑 → 占位状态.
+
+    条件 A: energy_k > ra_baseline_k       (绝对阈值——超过空房间基线)
+    条件 B: energy_k >= ra_peak_ratio × max(所有座位能量)  (相对阈值——座位间比较)
+    两者同时满足 → 瞬时占位, 再经滑动窗口平滑.
+    """
+
+    def __init__(self, params):
+        self.params = params
+        self._load_seats()
+        self.state_history = {s['name']: deque(maxlen=params.get('smooth_window', 3))
+                              for s in self.seats}
+        self.occupancy = {s['name']: 0 for s in self.seats}
+        self.energy_values = {s['name']: 0.0 for s in self.seats}
+        self.hold_until = {s['name']: 0.0 for s in self.seats}
+
+    def _load_seats(self):
+        seat_type = self.params.get('seat_type', '4_seats')
+        key = 'seats_4' if seat_type == '4_seats' else 'seats_5'
+        self.seats = self.params.get(key, self.params.get('seats_4', []))
+
+    def process(self, energy_dict):
+        """
+        energy_dict: {'1': 0.052, '2': 0.003, ...}
+        返回: (occupancy_dict, energy_dict)
+        """
+        for s in self.seats:
+            self.energy_values[s['name']] = energy_dict.get(s['name'], 0.0)
+
+        max_energy = max(self.energy_values.values()) if self.energy_values else 0.0
+
+        for seat in self.seats:
+            name = seat['name']
+            energy = self.energy_values[name]
+
+            baseline = seat.get('ra_baseline', 0.001)
+            ratio = seat.get('ra_peak_ratio', 0.3)
+
+            cond_a = energy > baseline
+            cond_b = energy >= ratio * max_energy if max_energy > 0 else False
+            instant_occ = 1 if (cond_a and cond_b) else 0
+
+            self.state_history[name].append(instant_occ)
+
+        self._smooth()
+        return dict(self.occupancy), dict(self.energy_values)
+
+    def _smooth(self):
+        """滑动平均 + 保持计时器 (与 SeatOccupancyDetector 完全一致)"""
+        m = self.params.get('smooth_threshold', 0.5)
+        hold_t = self.params.get('hold_time_sec', 0.0)
+        now = time.time()
+        for name, hist in self.state_history.items():
+            if len(hist) > 0:
+                avg = sum(hist) / len(hist)
+                self.occupancy[name] = 1 if avg > m else 0
+            if self.occupancy[name] == 1:
+                self.hold_until[name] = now + hold_t
+            elif hold_t > 0 and now < self.hold_until[name]:
+                self.occupancy[name] = 1
+
+    def get_seat_ellipses(self):
+        return [{'center': (s['cx'], s['cy']),
+                 'rx': s['rx'], 'ry': s['ry'],
+                 'name': s['name']} for s in self.seats]
+
+
 # ==============================================================================
 # 5. IO Layer
 # ==============================================================================
@@ -3124,6 +3406,36 @@ class PlotPanel(tk.Frame):
                 np.zeros((32, 64)), aspect='auto', origin='lower',
                 cmap='jet', interpolation='bilinear')
             self.axes['main'] = ax
+        elif mode == 'RA-OCCUPANCY':
+            gs = self.figure.add_gridspec(1, 2, width_ratios=[2, 1])
+            ax_hm = self.figure.add_subplot(gs[0, 0])
+            ax_occ = self.figure.add_subplot(gs[0, 1])
+
+            # 左: Cartesian RA 热力图 + 座位椭圆
+            ax_hm.set_title("RA Occupancy Heatmap (Cartesian)")
+            ax_hm.set_xlabel("X (m)")
+            ax_hm.set_ylabel("Y (m)")
+            ax_hm.grid(True, linestyle=':', alpha=0.5)
+            self.plots['ra_occ_hm'] = ax_hm.imshow(
+                np.zeros((100, 100)), aspect='equal', origin='lower',
+                cmap='jet', interpolation='bilinear')
+            self.plots['ra_occ_cbar'] = self.figure.colorbar(
+                self.plots['ra_occ_hm'], ax=ax_hm, fraction=0.046, pad=0.04)
+            self.plots['ra_occ_cbar'].set_label('Power')
+
+            # 画座位椭圆 (Cartesian 坐标系, 复用 _draw_seating_ellipses)
+            occ_params = params.copy()
+            occ_params['occupancy_config'] = params.get('occupancy_config', None)
+            self._draw_seating_ellipses(ax_hm, occ_params)
+
+            # 右: 状态面板 (纯文字)
+            ax_occ.set_title("Seat Status")
+            ax_occ.set_xlim(0, 1)
+            ax_occ.set_ylim(0, 1)
+            ax_occ.axis('off')
+            self.plots['ra_occ_texts'] = []
+
+            self.axes = {'main': ax_hm, 'occ': ax_occ}
         elif mode == 'ANGLE-SPECTRUM':
             gs = self.figure.add_gridspec(1, 2, width_ratios=[3, 1])
             ax_as = self.figure.add_subplot(gs[0, 0])
@@ -3148,6 +3460,31 @@ class PlotPanel(tk.Frame):
                 np.zeros((32, 64)), aspect='auto', origin='lower',
                 cmap='jet', interpolation='bilinear'
             )
+
+            self.axes = {'as': ax_as, 'rd': ax_rd}
+        elif mode == 'AS-RAW':
+            # 简单 1×2 布局: 左侧 DBF 角度谱曲线, 右侧 Range-Doppler 参考图
+            gs = self.figure.add_gridspec(1, 2, width_ratios=[3, 1])
+            ax_as = self.figure.add_subplot(gs[0, 0])
+            ax_rd = self.figure.add_subplot(gs[0, 1])
+
+            # 左: 每个 range bin 一条 DBF 角度谱曲线 (最强 doppler)
+            ax_as.set_title("DBF Angle Spectrum (first N range bins, max Doppler)")
+            ax_as.set_xlabel("Angle (°)")
+            ax_as.set_ylabel("Power (dB)")
+            ax_as.grid(True, linestyle=':', alpha=0.5)
+            ax_as.set_xlim(-70, 70)
+            self.plots['asr_curves'] = []
+            self.plots['asr_peaks'] = []
+            self.plots['asr_labels'] = []
+
+            # 右: Range-Doppler 参考图
+            ax_rd.set_title("Range-Doppler")
+            ax_rd.set_xlabel("Doppler bin")
+            ax_rd.set_ylabel("Range bin")
+            self.plots['asr_rd'] = ax_rd.imshow(
+                np.zeros((32, 64)), aspect='auto', origin='lower',
+                cmap='jet', interpolation='bilinear')
 
             self.axes = {'as': ax_as, 'rd': ax_rd}
         self.canvas.draw()
@@ -3280,11 +3617,83 @@ class PlotPanel(tk.Frame):
             self.plots['ra_hm'].set_data(H_db)
             self.plots['ra_hm'].set_extent([angles_deg[0], angles_deg[-1],
                                             ranges_m[0], ranges_m[-1]])
-            vmin = max(-40, np.percentile(H_db, 5))
+            vmin = np.min(H_db)
             vmax = np.max(H_db)
             self.plots['ra_hm'].set_clim(vmin=vmin, vmax=vmax)
             self.axes['main'].set_title(
                 f"Capon Range-Azimuth Heatmap | vmax={vmax:.1f}dB")
+            self.canvas.draw_idle()
+        elif mode == 'RA-OCCUPANCY':
+            H_cart = data['heatmap']          # Cartesian remapped
+            xs_cart = data['xs_cart']
+            ys_cart = data['ys_cart']
+            energy = data.get('energy', {})
+            occupancy = data.get('occupancy', {})
+
+            # === 左: Cartesian RA 热力图 ===
+            self.plots['ra_occ_hm'].set_data(H_cart)
+            self.plots['ra_occ_hm'].set_extent([xs_cart[0], xs_cart[-1],
+                                                ys_cart[0], ys_cart[-1]])
+            p = data.get('params', {})
+            clim_mode = p.get('heatmap_clim_mode', 'auto')
+            if clim_mode == 'fixed':
+                vmin = p.get('heatmap_clim_vmin', -80)
+                vmax = p.get('heatmap_clim_vmax', 0)
+            else:
+                vmin = max(-80, np.percentile(H_cart[H_cart > -np.inf], 5)
+                           if np.any(H_cart > -np.inf) else -80)
+                vmax = np.max(H_cart)
+            if vmin >= vmax:
+                vmin = vmax - 1.0
+            self.plots['ra_occ_hm'].set_clim(vmin=vmin, vmax=vmax)
+
+            # 座位椭圆着色 (复用 _update_seat_colors)
+            if occupancy:
+                self._update_seat_colors(occupancy)
+
+            # 标题: 能量和 + 占位状态
+            occ_parts = []
+            energy_parts = []
+            max_energy = 0.0
+            for seat_name in sorted(energy.keys(), key=lambda n: int(n)) if energy else []:
+                occ_parts.append(f"{seat_name}={occupancy.get(seat_name, 0)}")
+                energy_parts.append(f"{seat_name}={energy[seat_name]:.4f}")
+                if energy[seat_name] > max_energy:
+                    max_energy = energy[seat_name]
+            self.axes['main'].set_title(
+                f"RA Occupancy (Cartesian)\n"
+                f"maxE={max_energy:.4f} | "
+                f"Occ: [{'|'.join(occ_parts)}]\n"
+                f"E: [{'|'.join(energy_parts)}]")
+
+            # === 右: 状态面板 ===
+            ax_occ = self.axes['occ']
+            for t in self.plots.get('ra_occ_texts', []):
+                t.remove()
+            self.plots['ra_occ_texts'] = []
+            ax_occ.clear()
+            ax_occ.set_xlim(0, 1)
+            ax_occ.set_ylim(0, 1.2)
+            ax_occ.axis('off')
+
+            names = sorted(energy.keys(), key=lambda n: int(n)) if energy else []
+            for i, name in enumerate(names):
+                occ_val = occupancy.get(name, 0)
+                e_val = energy.get(name, 0.0)
+                y_pos = 1.05 - i * 0.20
+                c = 'red' if occ_val == 1 else 'green'
+                status_text = "OCCUPIED" if occ_val == 1 else "empty"
+                t1 = ax_occ.text(0.05, y_pos, f"Seat {name}",
+                                 color=c, fontsize=12, fontweight='bold',
+                                 transform=ax_occ.transAxes)
+                t2 = ax_occ.text(0.05, y_pos - 0.07, f"  {status_text}",
+                                 color=c, fontsize=10,
+                                 transform=ax_occ.transAxes)
+                t3 = ax_occ.text(0.05, y_pos - 0.14, f"  E={e_val:.4f}",
+                                 color='gray', fontsize=8,
+                                 transform=ax_occ.transAxes)
+                self.plots['ra_occ_texts'].extend([t1, t2, t3])
+
             self.canvas.draw_idle()
         elif mode == 'ANGLE-SPECTRUM':
             spectra = data['spectra']
@@ -3338,6 +3747,61 @@ class PlotPanel(tk.Frame):
             self.plots['rd_im'].set_data(power_map)
             if np.max(power_map) > 0:
                 self.plots['rd_im'].set_clim(vmin=0, vmax=np.max(power_map))
+
+            self.canvas.draw_idle()
+        elif mode == 'AS-RAW':
+            spectra = data['spectra']         # list of dicts: 每条 range bin 一个
+            power_map = data['power_map']     # [n_range, n_dop] dB
+
+            # === 左: DBF 角度谱曲线 (每个 range bin 一条) ===
+            ax = self.axes['as']
+            for line in self.plots['asr_curves']:
+                line.remove()
+            for pk in self.plots['asr_peaks']:
+                pk.remove()
+            for txt in self.plots['asr_labels']:
+                txt.remove()
+            self.plots['asr_curves'] = []
+            self.plots['asr_peaks'] = []
+            self.plots['asr_labels'] = []
+
+            colors = plt.cm.viridis(np.linspace(0.15, 0.95, max(1, len(spectra))))
+            for i, sp in enumerate(spectra):
+                line, = ax.plot(sp['angles_deg'], sp['pwr_db'],
+                                color=colors[i], alpha=0.85, linewidth=1.5)
+                self.plots['asr_curves'].append(line)
+
+                # 标记最强峰
+                peak_idx = np.argmax(sp['pwr_linear'])
+                peak_angle = sp['angles_deg'][peak_idx]
+                peak_pwr_db = sp['pwr_db'][peak_idx]
+                pk, = ax.plot(peak_angle, peak_pwr_db, 'x',
+                              color=colors[i], markersize=10, mew=2)
+                self.plots['asr_peaks'].append(pk)
+
+                # 标签: range_bin + distance + peak angle
+                txt = ax.annotate(
+                    f"R{sp['range_bin']} {sp['range_m']:.2f}m\nθ={peak_angle:.1f}° D{sp['doppler_bin']}",
+                    xy=(peak_angle, peak_pwr_db),
+                    xytext=(8, 8), textcoords='offset points',
+                    fontsize=7, color=colors[i],
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+                self.plots['asr_labels'].append(txt)
+
+            n_bins = len(spectra)
+            ax.set_title(f"DBF Angle Spectrum ({n_bins} range bins, max Doppler, no CFAR)")
+            # 动态 y 轴
+            if spectra:
+                all_db = np.concatenate([s['pwr_db'] for s in spectra])
+                y_min = max(-40, np.percentile(all_db, 5) - 5)
+                y_max = np.max(all_db) + 3
+                ax.set_ylim(y_min, y_max)
+
+            # === 右: Range-Doppler 参考图 ===
+            self.plots['asr_rd'].set_data(power_map)
+            vmin_rd = max(-20, np.percentile(power_map, 5))
+            vmax_rd = np.max(power_map)
+            self.plots['asr_rd'].set_clim(vmin=vmin_rd, vmax=vmax_rd)
 
             self.canvas.draw_idle()
         self.canvas.draw()
@@ -3453,7 +3917,7 @@ class SeatConfigDialog(tk.Toplevel):
         tk.Spinbox(top, textvariable=self.var_hold, from_=0.0, to=30.0, increment=0.5, width=5).grid(row=0, column=8)
 
         # 座椅参数卡片 (4 或 5 个)
-        seat_frame = tk.LabelFrame(self, text="座椅椭圆参数 (cx/cy=中心坐标, rx/ry=半轴, TH=检测阈值)", padx=10, pady=5)
+        seat_frame = tk.LabelFrame(self, text="座椅参数 (cx/cy=坐标, rx/ry=半轴, TH=点云阈值, baseline=RA空房基线, ratio=RA峰值比)", padx=10, pady=5)
         seat_frame.pack(fill='both', expand=True, padx=10, pady=5)
 
         # 画布+滚动条
@@ -3468,9 +3932,10 @@ class SeatConfigDialog(tk.Toplevel):
 
         # 表头
         headers = ['座椅', '名称', '中心X\ncx (m)', '中心Y\ncy (m)',
-                   '半轴X\nrx (m)', '半轴Y\nry (m)', '阈值\nTH']
+                   '半轴X\nrx (m)', '半轴Y\nry (m)', '阈值\nTH',
+                   'RA基线\nbaseline', 'RA峰值比\nratio']
         for j, h in enumerate(headers):
-            tk.Label(self.seat_inner, text=h, font=('Arial', 8, 'bold'),
+            tk.Label(self.seat_inner, text=h, font=('Arial', 7, 'bold'),
                      width=8, anchor='center', relief='ridge', bg='#e0e0e0').grid(row=0, column=j, padx=1, pady=1)
 
         # 为 5 个座椅各建一行控件 (4座显示前4行, 5座显示全部)
@@ -3497,8 +3962,15 @@ class SeatConfigDialog(tk.Toplevel):
             v_th = tk.StringVar(value='0.01')
             tk.Spinbox(self.seat_inner, textvariable=v_th, from_=0.001, to=0.5, increment=0.001, width=5).grid(row=i+1, column=6, padx=1)
 
+            v_ra_bl = tk.StringVar(value='0.001')
+            tk.Spinbox(self.seat_inner, textvariable=v_ra_bl, from_=0.0, to=10.0, increment=0.001, width=5).grid(row=i+1, column=7, padx=1)
+
+            v_ra_ratio = tk.StringVar(value='0.3')
+            tk.Spinbox(self.seat_inner, textvariable=v_ra_ratio, from_=0.0, to=1.0, increment=0.05, width=5).grid(row=i+1, column=8, padx=1)
+
             self.seat_vars.append({'name': v_name, 'cx': v_cx, 'cy': v_cy,
-                                    'rx': v_rx, 'ry': v_ry, 'th': v_th})
+                                    'rx': v_rx, 'ry': v_ry, 'th': v_th,
+                                    'ra_baseline': v_ra_bl, 'ra_peak_ratio': v_ra_ratio})
 
         # 底部按钮
         btn_row = tk.Frame(self, pady=10)
@@ -3530,6 +4002,8 @@ class SeatConfigDialog(tk.Toplevel):
                 sv['rx'].set(str(s.get('rx', 0.2)))
                 sv['ry'].set(str(s.get('ry', 0.2)))
                 sv['th'].set(str(s.get('th', 0.01)))
+                sv['ra_baseline'].set(str(s.get('ra_baseline', 0.001)))
+                sv['ra_peak_ratio'].set(str(s.get('ra_peak_ratio', 0.3)))
 
     def _save(self):
         """从 UI 控件写回 occ_params 字典, 执行回调"""
@@ -3556,6 +4030,8 @@ class SeatConfigDialog(tk.Toplevel):
                     'rx': float(sv['rx'].get()),
                     'ry': float(sv['ry'].get()),
                     'th': float(sv['th'].get()),
+                    'ra_baseline': float(sv['ra_baseline'].get()),
+                    'ra_peak_ratio': float(sv['ra_peak_ratio'].get()),
                 })
             except ValueError:
                 continue
@@ -3600,7 +4076,7 @@ class ControlPanel(tk.Frame):
         row1 = tk.Frame(frm_algo, bg='#f0f0f0')
         row1.pack(fill='x', padx=2)
         tk.Label(row1, text="Algo:", bg='#f0f0f0').pack(side='left')
-        self.cb_algo = ttk.Combobox(row1, values=('PLOT', '2D-MUSIC', 'POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER', 'RA-CFAR', 'RA-HEATMAP', 'ANGLE-SPECTRUM'), width=22, state='readonly')
+        self.cb_algo = ttk.Combobox(row1, values=('PLOT', '2D-MUSIC', 'POINT-CLOUD', 'POINT-CLOUD-OPTIMIZED', 'POINT-CLOUD-DUBHE', 'POINT-CLOUD-PAPER', 'RA-CFAR', 'RA-HEATMAP', 'RA-OCCUPANCY', 'ANGLE-SPECTRUM', 'AS-RAW'), width=22, state='readonly')
         self.cb_algo.set(config.current_algo)
         self.cb_algo.pack(side='left')
         self.cb_algo.bind("<<ComboboxSelected>>", self._on_algo_change)
@@ -4017,6 +4493,7 @@ class App:
         # 座椅占用检测器
         occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
         self.seat_detector = SeatOccupancyDetector(occ_params)
+        self.ra_occupancy_detector = RAOccupancyDetector(occ_params)
     def update_layout(self, mode):
         # 1. 更新绘图面板的布局
         p = self.config.algo_params.get(mode, {})
@@ -4026,6 +4503,7 @@ class App:
 
         # 2. 重建座椅检测器 (使配置修改立即生效)
         self.seat_detector = SeatOccupancyDetector(occ_cfg)
+        self.ra_occupancy_detector = RAOccupancyDetector(occ_cfg)
 
         # 3. 【核心修复】强制算法处理器重新初始化参数
         # 这样当你修改了虚拟天线索引、频率范围等参数时，后端才会重新计算
@@ -4071,8 +4549,9 @@ class App:
         self.plot_panel.pc_history = []
         occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
         self.seat_detector = SeatOccupancyDetector(occ_params)
+        self.ra_occupancy_detector = RAOccupancyDetector(occ_params)
         # ------------------------------------
-        
+
         print(f"开始处理 ({len(self.playback_queue)} 剩余): {os.path.basename(current_file)}")
         
         # 启动播放源
@@ -4186,8 +4665,15 @@ class App:
 
                 elif m == 'RA-HEATMAP':
                     d = self.algo_processor.step_ra_heatmap_view()
+                elif m == 'RA-OCCUPANCY':
+                    d = self.algo_processor.step_ra_occupancy()
+                    if d:
+                        occ, _ = self.ra_occupancy_detector.process(d['energy'])
+                        d['occupancy'] = occ
                 elif m == 'ANGLE-SPECTRUM':
                     d = self.algo_processor.step_angle_spectrum_view()
+                elif m == 'AS-RAW':
+                    d = self.algo_processor.step_angle_spectrum_raw()
 
                 if d:
                     self.plot_panel.update_data(m, d)

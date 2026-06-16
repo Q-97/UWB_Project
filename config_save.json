@@ -1,0 +1,905 @@
+{
+  "version": 1,
+  "radar_config": {
+    "ft_len": 32,
+    "max_snapshots": 127,
+    "udp_tx_list": [
+      1,
+      2
+    ],
+    "udp_rx_list": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "bg_m_factor": 4,
+    "num_tx_antennas": 2,
+    "num_rx_antennas": 4,
+    "rx_antenna_start_num": 4,
+    "connection_mode": "UDP",
+    "serial_port": "COM6",
+    "baud_rate": 460800,
+    "udp_ip": "127.0.0.1",
+    "udp_port": 55555,
+    "current_layout_name": "2x4_Default",
+    "current_algo": "RA-OCCUPANCY",
+    "snapshot_rate": 20,
+    "tap_interval_si": 1e-09,
+    "data_save_dir": "D:/uwb occupy data collection and ai learn/data",
+    "record_filename": "occ_empty.bin",
+    "record_duration": 10.0,
+    "playback_duration": 15.0,
+    "export_pc_json": false,
+    "recent_save_dirs": [
+      "D:/uwb occupy data collection and ai learn/data",
+      "./data"
+    ]
+  },
+  "algo_params": {
+    "PLOT": {
+      "tx_pair": 1,
+      "rx_pair": 6,
+      "show_raw": true,
+      "ylim_min": -100,
+      "ylim_max": 100
+    },
+    "2D-MUSIC": {
+      "center_freq": 7987200000.0,
+      "bandwidth": 100000000.0,
+      "epsilon_r": 1.0,
+      "system_delay": 0.0,
+      "cir_offset": 5,
+      "music_snapshots": 16,
+      "mdl_max_targets": 1,
+      "forward_backward": false,
+      "diag_load": 1e-05,
+      "fov_degrees": 180.0,
+      "music_threshold": 0.15,
+      "music_vmax": 0.6,
+      "virt_tx_idx": [
+        0,
+        1
+      ],
+      "virt_rx_idx": [
+        2,
+        3
+      ],
+      "fusion_mode": "cartesian",
+      "doppler_tx": 1,
+      "doppler_rx": 6,
+      "doppler_fft": 64,
+      "dop_th_start": 1200,
+      "dop_th_default": 1000,
+      "smooth_win": 10,
+      "breath_val_th": 0.25,
+      "breath_cnt_th": 5,
+      "plot_xlim": 2.0,
+      "plot_ylim_min": -4.0,
+      "plot_ylim_max": 0.0
+    },
+    "POINT-CLOUD": {
+      "center_freq": 7987200000.0,
+      "bandwidth": 100000000.0,
+      "snapshots": 64,
+      "cfar_threshold_db": 10.0,
+      "music_forward_backward": true,
+      "capon_diag_load": 0.001,
+      "range_train": 3,
+      "range_guard": 1,
+      "doppler_train": 4,
+      "doppler_guard": 2,
+      "point_lifetime_sec": 1.5,
+      "dist_per_tap": 0.1875,
+      "plot_xlim": 1.5,
+      "plot_ylim_min": -2.5,
+      "plot_ylim_max": 0.0,
+      "aoa_method": "MUSIC",
+      "fft_n": 16,
+      "num_virtual_ant": 8,
+      "antenna_spacing": 0.5,
+      "indices_azimuth": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "cfar_only_selected": true,
+      "cir_offset": 8,
+      "aoa_calib_mode": "linear",
+      "aoa_offset_deg": -12.0,
+      "aoa_scale": 1.0,
+      "ant_calib_en": false,
+      "ant_calib_phase": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "doppler_tx": 1,
+      "doppler_rx": 6
+    },
+    "POINT-CLOUD-OPTIMIZED": {
+      "center_freq": 7987200000.0,
+      "snapshots": 144,
+      "cir_combine_num": 9,
+      "leakage_offset": 5,
+      "doppler_window": "chebyshev",
+      "doppler_win_atten": 60,
+      "doppler_dc_remove": true,
+      "cfar_method": "ca-cfar",
+      "cfar_threshold_db": 10.0,
+      "range_train": 2,
+      "range_guard": 4,
+      "doppler_train": 4,
+      "doppler_guard": 2,
+      "cfar_velocity_min": 1,
+      "cfar_velocity_max": 20,
+      "cfar_range_min": 2,
+      "cfar_range_max": 20,
+      "cfar_range_peak_flag": false,
+      "cfar_doppler_peak_flag": true,
+      "subbin_refine_en": true,
+      "aoa_method": "DBF",
+      "fft_n": 16,
+      "antenna_spacing": 0.5,
+      "indices_azimuth": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "music_forward_backward": false,
+      "capon_diag_load": 0.001,
+      "ant_dbf_select": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "azi_angle_range": [
+        -90,
+        90
+      ],
+      "azimuth_num": 64,
+      "dbf_diff": 0,
+      "aoa_calib_mode": "linear",
+      "ant_calib_en": true,
+      "ant_calib_phase": [
+        -0.0,
+        -0.49072375380773364,
+        1.1062868947533422,
+        1.5748289100316295,
+        -0.5876511374160144,
+        -1.9895222818981357,
+        0.12190304520431955,
+        0.5787126081848506
+      ],
+      "aoa_cfar_en": true,
+      "aoa_cfar_guard": 3,
+      "aoa_cfar_train": 2,
+      "aoa_cfar_threshold_db": 8.0,
+      "aoa_debug_print": false,
+      "dist_per_tap": 0.1875,
+      "point_lifetime_sec": 0.02,
+      "plot_xlim": 1.5,
+      "plot_ylim_min": -2.5,
+      "plot_ylim_max": 0.0,
+      "aoa_offset_deg": 0.0,
+      "aoa_scale": 1.0,
+      "doppler_tx": 1,
+      "doppler_rx": 6,
+      "cfar_only_selected": true,
+      "aoa_multi_peak_en": false,
+      "aoa_peak_prominence_db": 10.0,
+      "aoa_peak_min_sep_deg": 9.0,
+      "aoa_peak_max_count": 5,
+      "aoa_noise_pct": 40,
+      "occupancy_config": {
+        "enable": true,
+        "seat_type": "4_seats",
+        "seats_4": [
+          {
+            "name": "1",
+            "cx": -0.3,
+            "cy": -0.55,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          },
+          {
+            "name": "2",
+            "cx": 0.3,
+            "cy": -0.55,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          },
+          {
+            "name": "3",
+            "cx": -0.3,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.3,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          },
+          {
+            "name": "4",
+            "cx": 0.3,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.3,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          }
+        ],
+        "seats_5": [
+          {
+            "name": "1",
+            "cx": -0.3,
+            "cy": -0.6,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          },
+          {
+            "name": "2",
+            "cx": 0.3,
+            "cy": -0.6,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          },
+          {
+            "name": "3",
+            "cx": -0.3,
+            "cy": -1.4,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.003
+          },
+          {
+            "name": "4",
+            "cx": 0.3,
+            "cy": -1.4,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.003
+          },
+          {
+            "name": "5",
+            "cx": 0.0,
+            "cy": 0.0,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          }
+        ],
+        "smooth_window": 6,
+        "smooth_threshold": 0.5,
+        "hold_time_sec": 5.0
+      }
+    },
+    "POINT-CLOUD-DUBHE": {
+      "center_freq": 7987200000.0,
+      "cir_combine_num": 5,
+      "ring_buffer_len": 50,
+      "slide_step": 20,
+      "leakage_offset": 5,
+      "doppler_win_en": true,
+      "doppler_win_coef": 60,
+      "doppler_dc_en": true,
+      "doppler_fft": 64,
+      "siso_ch": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "cfar_low_r_idx": 2,
+      "cfar_high_r_idx": 12,
+      "cfar_low_v_idx": 1,
+      "cfar_high_v_idx": 20,
+      "cfar_th": [
+        10,
+        10
+      ],
+      "cfar_range_peak_flag": true,
+      "cfar_doppler_peak_flag": true,
+      "dynamic_filter_en": true,
+      "noi_edges": [
+        -15,
+        -5,
+        10,
+        20
+      ],
+      "cfar_th_dynamic": [
+        15,
+        12,
+        10,
+        8,
+        7
+      ],
+      "ant_dbf_select": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "azi_angle_range": [
+        -70,
+        70
+      ],
+      "azimuth_num": 64,
+      "dbf_diff": 0,
+      "aoa_method": "DBF",
+      "fft_n": 16,
+      "antenna_spacing": 0.5,
+      "music_forward_backward": false,
+      "capon_diag_load": 0.001,
+      "aoa_calib_mode": "linear",
+      "aoa_offset_deg": -12.0,
+      "aoa_scale": 1.0,
+      "ant_calib_en": false,
+      "ant_calib_phase": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "dist_per_tap": 0.1875,
+      "point_lifetime_sec": 1.5,
+      "plot_xlim": 1.5,
+      "plot_ylim_min": -2.5,
+      "plot_ylim_max": 0.0,
+      "doppler_tx": 1,
+      "doppler_rx": 6,
+      "occupancy_config": {
+        "enable": true,
+        "seat_type": "4_seats",
+        "seats_4": [
+          {
+            "name": "1",
+            "cx": -0.25,
+            "cy": -0.3,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.02
+          },
+          {
+            "name": "2",
+            "cx": 0.25,
+            "cy": -0.3,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.02
+          },
+          {
+            "name": "3",
+            "cx": -0.3,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.3,
+            "th": 0.01
+          },
+          {
+            "name": "4",
+            "cx": 0.3,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.3,
+            "th": 0.01
+          }
+        ],
+        "seats_5": [
+          {
+            "name": "1",
+            "cx": -0.3,
+            "cy": -0.6,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          },
+          {
+            "name": "2",
+            "cx": 0.3,
+            "cy": -0.6,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          },
+          {
+            "name": "3",
+            "cx": -0.3,
+            "cy": -1.4,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.003
+          },
+          {
+            "name": "4",
+            "cx": 0.3,
+            "cy": -1.4,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.003
+          },
+          {
+            "name": "5",
+            "cx": 0.0,
+            "cy": 0.0,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          }
+        ],
+        "smooth_window": 6,
+        "smooth_threshold": 0.5,
+        "hold_time_sec": 5.0
+      }
+    },
+    "POINT-CLOUD-PAPER": {
+      "center_freq": 7987200000.0,
+      "bandwidth": 100000000.0,
+      "dist_per_tap": 0.1875,
+      "cir_offset": 8,
+      "snapshots": 64,
+      "num_virtual_ant": 8,
+      "antenna_spacing": 0.5,
+      "indices_azimuth": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "cfar_only_selected": true,
+      "doppler_window": "chebyshev",
+      "doppler_win_atten": 60,
+      "doppler_dc_remove": true,
+      "leakage_offset": 5,
+      "range_train": 4,
+      "range_guard": 2,
+      "range_threshold_db": 10.0,
+      "range_ave_pad": 3,
+      "doppler_sum_v_min": 1,
+      "doppler_sum_v_max": 20,
+      "angle_threshold_db": 8.0,
+      "aoa_coarse_n": 36,
+      "aoa_angle_range": [
+        -70,
+        70
+      ],
+      "aoa_method": "MUSIC",
+      "fft_n": 16,
+      "music_forward_backward": false,
+      "capon_diag_load": 0.001,
+      "zoom_in_factor": 3,
+      "zoom_threshold_gamma": 0.5,
+      "ant_dbf_select": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "azimuth_num": 64,
+      "dbf_diff": 0,
+      "ant_calib_en": false,
+      "ant_calib_phase": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aoa_calib_mode": "linear",
+      "aoa_offset_deg": -12.0,
+      "aoa_scale": 1.0,
+      "point_lifetime_sec": 1.5,
+      "plot_xlim": 1.5,
+      "plot_ylim_min": -2.5,
+      "plot_ylim_max": 0.0,
+      "doppler_tx": 1,
+      "doppler_rx": 6
+    },
+    "RA-CFAR": {
+      "center_freq": 7987200000.0,
+      "snapshots": 288,
+      "cir_combine_num": 9,
+      "leakage_offset": 5,
+      "doppler_window": "chebyshev",
+      "doppler_win_atten": 60,
+      "doppler_dc_remove": true,
+      "indices_azimuth": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "ant_dbf_select": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "azi_angle_range": [
+        -90,
+        90
+      ],
+      "azimuth_num": 64,
+      "ant_calib_en": true,
+      "ant_calib_phase": [
+        -0.0,
+        -0.49072375380773364,
+        1.1062868947533422,
+        1.5748289100316295,
+        -0.5876511374160144,
+        -1.9895222818981357,
+        0.12190304520431955,
+        0.5787126081848506
+      ],
+      "capon_diag_load": 0.001,
+      "cfar_mode": "2d_ca1",
+      "range_train": 2,
+      "range_guard": 1,
+      "azimuth_train": 2,
+      "azimuth_guard": 1,
+      "cfar_threshold_db": 8.0,
+      "cfar_range_peak_flag": false,
+      "cfar_azimuth_peak_flag": true,
+      "cfar_range_min": 2,
+      "cfar_range_max": 20,
+      "pass1_N_W_R": 1,
+      "pass1_N_G_R": 2,
+      "pass1_N_ave_R": 2,
+      "pass1_gamma_R_db": 8.0,
+      "pass2_N_W_phi": 2,
+      "pass2_N_G_phi": 5,
+      "pass2_gamma_phi_db": 10.0,
+      "dist_per_tap": 0.1875,
+      "point_lifetime_sec": 1.5,
+      "plot_xlim": 1.5,
+      "plot_ylim_min": -2.5,
+      "plot_ylim_max": 0.0,
+      "aoa_offset_deg": 0.0,
+      "aoa_scale": 1.0,
+      "aoa_calib_mode": "linear",
+      "aoa_debug_print": true,
+      "occupancy_config": {
+        "enable": true,
+        "seat_type": "4_seats",
+        "seats_4": [
+          {
+            "name": "1",
+            "cx": -0.3,
+            "cy": -0.55,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          },
+          {
+            "name": "2",
+            "cx": 0.3,
+            "cy": -0.55,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          },
+          {
+            "name": "3",
+            "cx": -0.3,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.3,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          },
+          {
+            "name": "4",
+            "cx": 0.3,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.3,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          }
+        ],
+        "seats_5": [
+          {
+            "name": "1",
+            "cx": -0.3,
+            "cy": -0.6,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          },
+          {
+            "name": "2",
+            "cx": 0.3,
+            "cy": -0.6,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          },
+          {
+            "name": "3",
+            "cx": -0.3,
+            "cy": -1.4,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.003
+          },
+          {
+            "name": "4",
+            "cx": 0.3,
+            "cy": -1.4,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.003
+          },
+          {
+            "name": "5",
+            "cx": 0.0,
+            "cy": 0.0,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          }
+        ],
+        "smooth_window": 6,
+        "smooth_threshold": 0.5,
+        "hold_time_sec": 5.0
+      }
+    },
+    "RA-OCCUPANCY": {
+      "center_freq": 7987200000.0,
+      "snapshots": 64,
+      "cir_combine_num": 1,
+      "leakage_offset": 5,
+      "doppler_window": "chebyshev",
+      "doppler_win_atten": 60,
+      "doppler_dc_remove": true,
+      "indices_azimuth": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "ant_dbf_select": [
+        2,
+        3,
+        6,
+        7
+      ],
+      "azi_angle_range": [
+        -60,
+        60
+      ],
+      "azimuth_num": 64,
+      "ant_calib_en": true,
+      "ant_calib_phase": [
+        -0.0,
+        -0.49072375380773364,
+        1.1062868947533422,
+        1.5748289100316295,
+        -0.5876511374160144,
+        -1.9895222818981357,
+        0.12190304520431955,
+        0.5787126081848506
+      ],
+      "capon_diag_load": 0.001,
+      "dist_per_tap": 0.1875,
+      "plot_xlim": 1.5,
+      "plot_ylim_min": -2.5,
+      "plot_ylim_max": -0.1,
+      "heatmap_clim_mode": "auto",
+      "heatmap_clim_vmin": 0,
+      "heatmap_clim_vmax": 100,
+      "occupancy_config": {
+        "enable": true,
+        "seat_type": "4_seats",
+        "seats_4": [
+          {
+            "name": "1",
+            "cx": -0.3,
+            "cy": -0.45,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          },
+          {
+            "name": "2",
+            "cx": 0.3,
+            "cy": -0.45,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          },
+          {
+            "name": "3",
+            "cx": -0.3,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.3,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          },
+          {
+            "name": "4",
+            "cx": 0.3,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.3,
+            "th": 0.015,
+            "ra_baseline": 0.5,
+            "ra_peak_ratio": 0.3
+          }
+        ],
+        "seats_5": [
+          {
+            "name": "1",
+            "cx": -0.3,
+            "cy": -0.6,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          },
+          {
+            "name": "2",
+            "cx": 0.3,
+            "cy": -0.6,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          },
+          {
+            "name": "3",
+            "cx": -0.3,
+            "cy": -1.4,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.003
+          },
+          {
+            "name": "4",
+            "cx": 0.3,
+            "cy": -1.4,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.003
+          },
+          {
+            "name": "5",
+            "cx": 0.0,
+            "cy": 0.0,
+            "rx": 0.2,
+            "ry": 0.2,
+            "th": 0.01
+          }
+        ],
+        "smooth_window": 6,
+        "smooth_threshold": 0.5,
+        "hold_time_sec": 5.0
+      }
+    },
+    "SEAT-OCCUPANCY": {
+      "enable": true,
+      "seat_type": "4_seats",
+      "seats_4": [
+        {
+          "name": "1",
+          "cx": -0.3,
+          "cy": -0.45,
+          "rx": 0.2,
+          "ry": 0.2,
+          "th": 0.015,
+          "ra_baseline": 0.5,
+          "ra_peak_ratio": 0.3
+        },
+        {
+          "name": "2",
+          "cx": 0.3,
+          "cy": -0.45,
+          "rx": 0.2,
+          "ry": 0.2,
+          "th": 0.015,
+          "ra_baseline": 0.5,
+          "ra_peak_ratio": 0.3
+        },
+        {
+          "name": "3",
+          "cx": -0.3,
+          "cy": -1.2,
+          "rx": 0.2,
+          "ry": 0.3,
+          "th": 0.015,
+          "ra_baseline": 0.5,
+          "ra_peak_ratio": 0.3
+        },
+        {
+          "name": "4",
+          "cx": 0.3,
+          "cy": -1.2,
+          "rx": 0.2,
+          "ry": 0.3,
+          "th": 0.015,
+          "ra_baseline": 0.5,
+          "ra_peak_ratio": 0.3
+        }
+      ],
+      "seats_5": [
+        {
+          "name": "1",
+          "cx": -0.3,
+          "cy": -0.6,
+          "rx": 0.2,
+          "ry": 0.2,
+          "th": 0.01
+        },
+        {
+          "name": "2",
+          "cx": 0.3,
+          "cy": -0.6,
+          "rx": 0.2,
+          "ry": 0.2,
+          "th": 0.01
+        },
+        {
+          "name": "3",
+          "cx": -0.3,
+          "cy": -1.4,
+          "rx": 0.2,
+          "ry": 0.2,
+          "th": 0.003
+        },
+        {
+          "name": "4",
+          "cx": 0.3,
+          "cy": -1.4,
+          "rx": 0.2,
+          "ry": 0.2,
+          "th": 0.003
+        },
+        {
+          "name": "5",
+          "cx": 0.0,
+          "cy": 0.0,
+          "rx": 0.2,
+          "ry": 0.2,
+          "th": 0.01
+        }
+      ],
+      "smooth_window": 6,
+      "smooth_threshold": 0.5,
+      "hold_time_sec": 5.0
+    }
+  }
+}
