@@ -442,6 +442,7 @@ DEFAULT_ALGO_PARAMS = {
         "smooth_window": 3,
         "smooth_threshold": 0.5,
         "hold_time_sec": 2.0,
+        "adult_threshold": 0.02,
     },
 
 
@@ -3088,7 +3089,8 @@ class RAOccupancyDetector:
     def process(self, energy_dict):
         """
         energy_dict: {'1': 0.052, '2': 0.003, ...}
-        返回: (occupancy_dict, energy_dict)
+        返回: (occupancy_dict, energy_dict, state_dict)
+              state: 0=empty, 1=child, 2=adult
         """
         for s in self.seats:
             self.energy_values[s['name']] = energy_dict.get(s['name'], 0.0)
@@ -3109,7 +3111,20 @@ class RAOccupancyDetector:
             self.state_history[name].append(instant_occ)
 
         self._smooth()
-        return dict(self.occupancy), dict(self.energy_values)
+
+        # 基于二元占用 + adult_threshold 计算三态
+        adult_th = self.params.get('adult_threshold', 0.02)
+        state = {}
+        for s in self.seats:
+            name = s['name']
+            if self.occupancy[name] == 0:
+                state[name] = 0  # 空
+            elif self.energy_values[name] >= adult_th:
+                state[name] = 2  # 成人
+            else:
+                state[name] = 1  # 儿童
+
+        return dict(self.occupancy), dict(self.energy_values), state
 
     def _smooth(self):
         """滑动平均 + 保持计时器 (与 SeatOccupancyDetector 完全一致)"""
@@ -3428,12 +3443,60 @@ class PlotPanel(tk.Frame):
             occ_params['occupancy_config'] = params.get('occupancy_config', None)
             self._draw_seating_ellipses(ax_hm, occ_params)
 
-            # 右: 状态面板 (纯文字)
+            # 右: 田字格状态面板 (2x2 grid)
             ax_occ.set_title("Seat Status")
             ax_occ.set_xlim(0, 1)
             ax_occ.set_ylim(0, 1)
             ax_occ.axis('off')
-            self.plots['ra_occ_texts'] = []
+
+            # 田字格分割线
+            ax_occ.plot([0.5, 0.5], [0, 1], 'k-', lw=2, transform=ax_occ.transAxes)
+            ax_occ.plot([0, 1], [0.5, 0.5], 'k-', lw=2, transform=ax_occ.transAxes)
+
+            # 4 座位置: TL=1(前排左), TR=2(前排右), BL=3(后排左), BR=4(后排右)
+            cell_layout = {
+                '1': (0.02, 0.52, 0.46, 0.44),   # 左上
+                '2': (0.52, 0.52, 0.46, 0.44),   # 右上
+                '3': (0.02, 0.02, 0.46, 0.44),   # 左下
+                '4': (0.52, 0.02, 0.46, 0.44),   # 右下
+            }
+
+            self.plots['ra_occ_tian'] = {}
+            for name, (cx, cy, cw, ch) in cell_layout.items():
+                # 格子边框 (浅灰底色)
+                border = patches.Rectangle(
+                    (cx, cy), cw, ch, transform=ax_occ.transAxes,
+                    facecolor='#f0f0f0', edgecolor='#888888',
+                    linewidth=1.5, zorder=1)
+                ax_occ.add_patch(border)
+
+                # 座位名标签 (顶部居中)
+                t_name = ax_occ.text(
+                    cx + cw / 2, cy + ch - 0.06, f"Seat {name}",
+                    ha='center', va='center', fontsize=11, fontweight='bold',
+                    transform=ax_occ.transAxes, zorder=3)
+
+                # 状态色块 (中间区域)
+                status_rect = patches.Rectangle(
+                    (cx + 0.04, cy + 0.06), cw - 0.08, ch - 0.22,
+                    transform=ax_occ.transAxes,
+                    facecolor='green', edgecolor='none',
+                    alpha=0.85, zorder=2)
+                ax_occ.add_patch(status_rect)
+
+                # 能量值/状态文字 (色块中央)
+                t_energy = ax_occ.text(
+                    cx + cw / 2, cy + 0.06 + (ch - 0.22) / 2,
+                    "empty", ha='center', va='center',
+                    fontsize=9, fontweight='bold', color='white',
+                    transform=ax_occ.transAxes, zorder=3)
+
+                self.plots['ra_occ_tian'][name] = {
+                    'border': border,
+                    'name_text': t_name,
+                    'status_rect': status_rect,
+                    'energy_text': t_energy,
+                }
 
             self.axes = {'main': ax_hm, 'occ': ax_occ}
         elif mode == 'ANGLE-SPECTRUM':
@@ -3666,33 +3729,22 @@ class PlotPanel(tk.Frame):
                 f"Occ: [{'|'.join(occ_parts)}]\n"
                 f"E: [{'|'.join(energy_parts)}]")
 
-            # === 右: 状态面板 ===
-            ax_occ = self.axes['occ']
-            for t in self.plots.get('ra_occ_texts', []):
-                t.remove()
-            self.plots['ra_occ_texts'] = []
-            ax_occ.clear()
-            ax_occ.set_xlim(0, 1)
-            ax_occ.set_ylim(0, 1.2)
-            ax_occ.axis('off')
+            # === 右: 田字格状态面板 (原地更新色块+文字, 不复绘) ===
+            state = data.get('state', {})  # 0=empty, 1=child, 2=adult
+            state_colors = {0: 'green', 1: 'gold', 2: 'red'}
+            state_labels = {0: 'empty', 1: 'child', 2: 'ADULT'}
 
-            names = sorted(energy.keys(), key=lambda n: int(n)) if energy else []
-            for i, name in enumerate(names):
-                occ_val = occupancy.get(name, 0)
+            for name, cell in self.plots.get('ra_occ_tian', {}).items():
+                s_val = state.get(name, 0)
                 e_val = energy.get(name, 0.0)
-                y_pos = 1.05 - i * 0.20
-                c = 'red' if occ_val == 1 else 'green'
-                status_text = "OCCUPIED" if occ_val == 1 else "empty"
-                t1 = ax_occ.text(0.05, y_pos, f"Seat {name}",
-                                 color=c, fontsize=12, fontweight='bold',
-                                 transform=ax_occ.transAxes)
-                t2 = ax_occ.text(0.05, y_pos - 0.07, f"  {status_text}",
-                                 color=c, fontsize=10,
-                                 transform=ax_occ.transAxes)
-                t3 = ax_occ.text(0.05, y_pos - 0.14, f"  E={e_val:.4f}",
-                                 color='gray', fontsize=8,
-                                 transform=ax_occ.transAxes)
-                self.plots['ra_occ_texts'].extend([t1, t2, t3])
+                color = state_colors.get(s_val, 'green')
+                label = state_labels.get(s_val, 'empty')
+
+                cell['status_rect'].set_facecolor(color)
+                cell['energy_text'].set_text(f"{label}\nE={e_val:.4f}")
+                # 金色背景用深色文字
+                text_color = 'black' if s_val == 1 else 'white'
+                cell['energy_text'].set_color(text_color)
 
             self.canvas.draw_idle()
         elif mode == 'ANGLE-SPECTRUM':
@@ -3916,6 +3968,10 @@ class SeatConfigDialog(tk.Toplevel):
         self.var_hold = tk.StringVar(value='2.0')
         tk.Spinbox(top, textvariable=self.var_hold, from_=0.0, to=30.0, increment=0.5, width=5).grid(row=0, column=8)
 
+        tk.Label(top, text="成人阈值(RA):").grid(row=1, column=0, padx=(5, 2), pady=(5, 2))
+        self.var_adult_th = tk.StringVar(value='0.02')
+        tk.Spinbox(top, textvariable=self.var_adult_th, from_=0.0, to=1.0, increment=0.001, width=6).grid(row=1, column=1, padx=2, pady=(5, 2), sticky='w')
+
         # 座椅参数卡片 (4 或 5 个)
         seat_frame = tk.LabelFrame(self, text="座椅参数 (cx/cy=坐标, rx/ry=半轴, TH=点云阈值, baseline=RA空房基线, ratio=RA峰值比)", padx=10, pady=5)
         seat_frame.pack(fill='both', expand=True, padx=10, pady=5)
@@ -3990,6 +4046,7 @@ class SeatConfigDialog(tk.Toplevel):
         self.var_smooth.set(str(p.get('smooth_window', 3)))
         self.var_smooth_th.set(str(p.get('smooth_threshold', 0.5)))
         self.var_hold.set(str(p.get('hold_time_sec', 2.0)))
+        self.var_adult_th.set(str(p.get('adult_threshold', 0.02)))
 
         key = 'seats_4' if self.var_seat_type.get() == '4_seats' else 'seats_5'
         seats = p.get(key, p.get('seats_4', []))
@@ -4014,6 +4071,7 @@ class SeatConfigDialog(tk.Toplevel):
             p['smooth_window'] = int(self.var_smooth.get())
             p['smooth_threshold'] = float(self.var_smooth_th.get())
             p['hold_time_sec'] = float(self.var_hold.get())
+            p['adult_threshold'] = float(self.var_adult_th.get())
         except ValueError:
             pass
 
@@ -4668,8 +4726,9 @@ class App:
                 elif m == 'RA-OCCUPANCY':
                     d = self.algo_processor.step_ra_occupancy()
                     if d:
-                        occ, _ = self.ra_occupancy_detector.process(d['energy'])
+                        occ, _, state = self.ra_occupancy_detector.process(d['energy'])
                         d['occupancy'] = occ
+                        d['state'] = state
                 elif m == 'ANGLE-SPECTRUM':
                     d = self.algo_processor.step_angle_spectrum_view()
                 elif m == 'AS-RAW':

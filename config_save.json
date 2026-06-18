@@ -676,8 +676,8 @@
     },
     "RA-OCCUPANCY": {
       "center_freq": 7987200000.0,
-      "snapshots": 64,
-      "cir_combine_num": 1,
+      "snapshots": 576,
+      "cir_combine_num": 9,
       "leakage_offset": 5,
       "doppler_window": "chebyshev",
       "doppler_win_atten": 60,
@@ -807,7 +807,8 @@
         ],
         "smooth_window": 6,
         "smooth_threshold": 0.5,
-        "hold_time_sec": 5.0
+        "hold_time_sec": 5.0,
+        "adult_threshold": 1.0
       }
     },
     "SEAT-OCCUPANCY": {
@@ -899,7 +900,8 @@
       ],
       "smooth_window": 6,
       "smooth_threshold": 0.5,
-      "hold_time_sec": 5.0
+      "hold_time_sec": 5.0,
+      "adult_threshold": 1.0
     }
   }
 }
