@@ -418,31 +418,39 @@ DEFAULT_ALGO_PARAMS = {
         "enable": True,
         "seat_type": "4_seats",
         "seats_4": [
-            {"name": "1", "cx": -0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "th": 0.010,
-             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
-            {"name": "2", "cx":  0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "th": 0.010,
-             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
-            {"name": "3", "cx": -0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "th": 0.005,
-             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
-            {"name": "4", "cx":  0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "th": 0.005,
-             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
+            {"name": "1", "ra_peak_ratio": 0.3,
+             "adult": {"cx": -0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "threshold": 0.02},
+             "child": {"cx": -0.25, "cy": -0.70, "rx": 0.15, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+            {"name": "2", "ra_peak_ratio": 0.3,
+             "adult": {"cx":  0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "threshold": 0.02},
+             "child": {"cx":  0.25, "cy": -0.70, "rx": 0.15, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+            {"name": "3", "ra_peak_ratio": 0.3,
+             "adult": {"cx": -0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "threshold": 0.02},
+             "child": {"cx": -0.25, "cy": -1.50, "rx": 0.15, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+            {"name": "4", "ra_peak_ratio": 0.3,
+             "adult": {"cx":  0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "threshold": 0.02},
+             "child": {"cx":  0.25, "cy": -1.50, "rx": 0.15, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
         ],
         "seats_5": [
-            {"name": "1", "cx": -0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "th": 0.010,
-             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
-            {"name": "2", "cx":  0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "th": 0.010,
-             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
-            {"name": "3", "cx": -0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005,
-             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
-            {"name": "4", "cx":  0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005,
-             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
-            {"name": "5", "cx":  0.00, "cy": -1.30, "rx": 0.17, "ry": 0.20, "th": 0.005,
-             "ra_baseline": 0.001, "ra_peak_ratio": 0.3},
+            {"name": "1", "ra_peak_ratio": 0.3,
+             "adult": {"cx": -0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "threshold": 0.02},
+             "child": {"cx": -0.25, "cy": -0.60, "rx": 0.19, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+            {"name": "2", "ra_peak_ratio": 0.3,
+             "adult": {"cx":  0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "threshold": 0.02},
+             "child": {"cx":  0.25, "cy": -0.60, "rx": 0.19, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+            {"name": "3", "ra_peak_ratio": 0.3,
+             "adult": {"cx": -0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "threshold": 0.02},
+             "child": {"cx": -0.35, "cy": -1.40, "rx": 0.13, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+            {"name": "4", "ra_peak_ratio": 0.3,
+             "adult": {"cx":  0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "threshold": 0.02},
+             "child": {"cx":  0.35, "cy": -1.40, "rx": 0.13, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+            {"name": "5", "ra_peak_ratio": 0.3,
+             "adult": {"cx":  0.00, "cy": -1.30, "rx": 0.17, "ry": 0.20, "threshold": 0.02},
+             "child": {"cx":  0.00, "cy": -1.40, "rx": 0.13, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
         ],
         "smooth_window": 3,
         "smooth_threshold": 0.5,
         "hold_time_sec": 2.0,
-        "adult_threshold": 0.02,
     },
 
 
@@ -1854,7 +1862,9 @@ class AlgorithmProcessor:
         energy_dict = {}
         for seat in seat_defs:
             name = seat['name']
-            energy_dict[name] = self._seat_ra_energy(H_bg, ranges_m, angles_deg, seat)
+            adult_e = self._seat_ra_energy(H_bg, ranges_m, angles_deg, seat.get('adult', seat))
+            child_e = self._seat_ra_energy(H_bg, ranges_m, angles_deg, seat.get('child', seat))
+            energy_dict[name] = {'adult': adult_e, 'child': child_e}
 
         # Cartesian 重映射 (直接使用背景减除后的 H_bg 线性功率)
         xlim = params.get('plot_xlim', 1.5)
@@ -3011,8 +3021,9 @@ class SeatOccupancyDetector:
         # 1. 椭圆筛选 + 每座椅 N_k 和 σ_k
         seat_points = {}
         for seat in self.seats:
+            ellipse = seat.get('adult', seat)  # 优先成人椭圆, fallback 兼容旧配置
             pts = [(p['pos'][0], p['pos'][1]) for p in detected_points
-                   if self._point_in_ellipse(p['pos'][0], p['pos'][1], seat)]
+                   if self._point_in_ellipse(p['pos'][0], p['pos'][1], ellipse)]
             seat_points[seat['name']] = pts
 
         N_list = [len(seat_points[s['name']]) for s in self.seats]
@@ -3032,7 +3043,7 @@ class SeatOccupancyDetector:
             
         # 3. 公式 (15): 阈值判决
         for i, seat in enumerate(self.seats):
-            so_instant = 1 if f_values_list[i] > seat['th'] else 0
+            so_instant = 1 if f_values_list[i] > seat.get('th', 0.01) else 0
             
             self.state_history[seat['name']].append(so_instant)
 
@@ -3057,29 +3068,31 @@ class SeatOccupancyDetector:
 
     def get_seat_ellipses(self):
         """供 PlotPanel 绘图使用, 返回椭圆参数列表"""
-        return [{'center': (s['cx'], s['cy']),
-                 'rx': s['rx'], 'ry': s['ry'],
+        return [{'center': (s.get('adult', s)['cx'], s.get('adult', s)['cy']),
+                 'rx': s.get('adult', s)['rx'], 'ry': s.get('adult', s)['ry'],
                  'name': s['name']} for s in self.seats]
 
 
 class RAOccupancyDetector:
     """
     RA热力图能量占位检测器 (无 CFAR / 无点云).
-    输入每座椅椭圆内的 Capon 能量和, 双条件判决 + 时序平滑 → 占位状态.
+    每座位含 ADULT 和 CHILD 两套椭圆, 分别计算 Capon 能量, 双条件判决 + 时序平滑.
 
-    条件 A: energy_k > ra_baseline_k       (绝对阈值——超过空房间基线)
-    条件 B: energy_k >= ra_peak_ratio × max(所有座位能量)  (相对阈值——座位间比较)
-    两者同时满足 → 瞬时占位, 再经滑动窗口平滑.
+    判决逻辑:
+      ADULT: adult_e > adult.threshold AND adult_e >= ra_peak_ratio * max(所有座位 adult_e) → state=2
+      CHILD: child_e > child.threshold (仅成人不满足时) → state=1
+      否则 state=0 → 经滑动窗口平滑输出.
     """
 
     def __init__(self, params):
         self.params = params
         self._load_seats()
-        self.state_history = {s['name']: deque(maxlen=params.get('smooth_window', 3))
-                              for s in self.seats}
+        win_size = params.get('smooth_window', 3)
+        self.state_window = {s['name']: deque(maxlen=win_size) for s in self.seats}
         self.occupancy = {s['name']: 0 for s in self.seats}
-        self.energy_values = {s['name']: 0.0 for s in self.seats}
+        self.energy_values = {s['name']: {'adult': 0.0, 'child': 0.0} for s in self.seats}
         self.hold_until = {s['name']: 0.0 for s in self.seats}
+        self._last_state = {s['name']: 0 for s in self.seats}
 
     def _load_seats(self):
         seat_type = self.params.get('seat_type', '4_seats')
@@ -3088,61 +3101,90 @@ class RAOccupancyDetector:
 
     def process(self, energy_dict):
         """
-        energy_dict: {'1': 0.052, '2': 0.003, ...}
+        energy_dict: {'1': {'adult': 0.052, 'child': 0.030}, ...}
         返回: (occupancy_dict, energy_dict, state_dict)
               state: 0=empty, 1=child, 2=adult
         """
         for s in self.seats:
-            self.energy_values[s['name']] = energy_dict.get(s['name'], 0.0)
+            name = s['name']
+            e = energy_dict.get(name, {})
+            if isinstance(e, dict):
+                self.energy_values[name] = {'adult': e.get('adult', 0.0),
+                                            'child': e.get('child', 0.0)}
+            else:
+                self.energy_values[name] = {'adult': float(e), 'child': 0.0}
 
-        max_energy = max(self.energy_values.values()) if self.energy_values else 0.0
+        # 仅用成人能量做相对比较
+        max_adult = max(self.energy_values[n]['adult'] for n in self.energy_values) \
+                    if self.energy_values else 0.0
 
         for seat in self.seats:
             name = seat['name']
-            energy = self.energy_values[name]
-
-            baseline = seat.get('ra_baseline', 0.001)
+            adult_e = self.energy_values[name]['adult']
+            child_e = self.energy_values[name]['child']
             ratio = seat.get('ra_peak_ratio', 0.3)
 
-            cond_a = energy > baseline
-            cond_b = energy >= ratio * max_energy if max_energy > 0 else False
-            instant_occ = 1 if (cond_a and cond_b) else 0
+            # 成人: threshold + ra_peak_ratio 双条件
+            adult_cfg = seat.get('adult', seat)
+            adult_th = adult_cfg.get('threshold', 0.02)
 
-            self.state_history[name].append(instant_occ)
+            if adult_e > adult_th and (max_adult == 0 or adult_e >= ratio * max_adult):
+                self.state_window[name].append(2)  # ADULT
+            else:
+                # 小孩: 区间判断 threshold_low < energy < threshold_high (无 ra_peak_ratio)
+                child_cfg = seat.get('child', seat)
+                child_lo = child_cfg.get('threshold_low', child_cfg.get('threshold', 0.05))
+                child_hi = child_cfg.get('threshold_high', 5.0)
+                if child_lo < child_e < child_hi:
+                    self.state_window[name].append(1)  # CHILD
+                else:
+                    self.state_window[name].append(0)  # EMPTY
 
         self._smooth()
 
-        # 基于二元占用 + adult_threshold 计算三态
-        adult_th = self.params.get('adult_threshold', 0.02)
+        # 计数平滑后: 若占用 → 窗口内非零帧全是 1 才是小孩, 否则成人
         state = {}
         for s in self.seats:
             name = s['name']
             if self.occupancy[name] == 0:
-                state[name] = 0  # 空
-            elif self.energy_values[name] >= adult_th:
-                state[name] = 2  # 成人
+                state[name] = 0
             else:
-                state[name] = 1  # 儿童
+                window = list(self.state_window[name])
+                non_zero = [v for v in window if v > 0]
+                if not non_zero:
+                    state[name] = self._last_state.get(name, 0)
+                elif all(v == 1 for v in non_zero):
+                    state[name] = 1  # 全是小孩 → child
+                    self._last_state[name] = 1
+                else:
+                    state[name] = 2  # 出现过成人 → adult
+                    self._last_state[name] = 2
 
         return dict(self.occupancy), dict(self.energy_values), state
 
     def _smooth(self):
-        """滑动平均 + 保持计时器 (与 SeatOccupancyDetector 完全一致)"""
-        m = self.params.get('smooth_threshold', 0.5)
+        """计数平滑: 窗口内非零帧数 >= min_count → 占用. 含 hold_time 保持."""
+        win_size = self.params.get('smooth_window', 3)
+        ratio = self.params.get('smooth_threshold', 0.5)
+        min_count = max(1, int(np.ceil(win_size * ratio)))
         hold_t = self.params.get('hold_time_sec', 0.0)
         now = time.time()
-        for name, hist in self.state_history.items():
-            if len(hist) > 0:
-                avg = sum(hist) / len(hist)
-                self.occupancy[name] = 1 if avg > m else 0
+        for name, window in self.state_window.items():
+            w = list(window)
+            occupied_frames = sum(1 for v in w if v > 0)
+            if occupied_frames >= min_count:
+                self.occupancy[name] = 1
+            else:
+                self.occupancy[name] = 0
+            # hold_time 保持
             if self.occupancy[name] == 1:
                 self.hold_until[name] = now + hold_t
             elif hold_t > 0 and now < self.hold_until[name]:
                 self.occupancy[name] = 1
 
     def get_seat_ellipses(self):
-        return [{'center': (s['cx'], s['cy']),
-                 'rx': s['rx'], 'ry': s['ry'],
+        return [{'center': (s.get('adult', s)['cx'], s.get('adult', s)['cy']),
+                 'rx': s.get('adult', s)['rx'], 'ry': s.get('adult', s)['ry'],
                  'name': s['name']} for s in self.seats]
 
 
@@ -3717,15 +3759,21 @@ class PlotPanel(tk.Frame):
             # 标题: 能量和 + 占位状态
             occ_parts = []
             energy_parts = []
-            max_energy = 0.0
+            max_adult_e = 0.0
             for seat_name in sorted(energy.keys(), key=lambda n: int(n)) if energy else []:
                 occ_parts.append(f"{seat_name}={occupancy.get(seat_name, 0)}")
-                energy_parts.append(f"{seat_name}={energy[seat_name]:.4f}")
-                if energy[seat_name] > max_energy:
-                    max_energy = energy[seat_name]
+                e = energy.get(seat_name, {})
+                if isinstance(e, dict):
+                    a_e = e.get('adult', 0.0)
+                    c_e = e.get('child', 0.0)
+                    energy_parts.append(f"{seat_name} A={a_e:.4f} C={c_e:.4f}")
+                    max_adult_e = max(max_adult_e, a_e)
+                else:
+                    energy_parts.append(f"{seat_name}={e:.4f}")
+                    max_adult_e = max(max_adult_e, e)
             self.axes['main'].set_title(
                 f"RA Occupancy (Cartesian)\n"
-                f"maxE={max_energy:.4f} | "
+                f"max adultE={max_adult_e:.4f} | "
                 f"Occ: [{'|'.join(occ_parts)}]\n"
                 f"E: [{'|'.join(energy_parts)}]")
 
@@ -3736,12 +3784,18 @@ class PlotPanel(tk.Frame):
 
             for name, cell in self.plots.get('ra_occ_tian', {}).items():
                 s_val = state.get(name, 0)
-                e_val = energy.get(name, 0.0)
+                e = energy.get(name, {})
+                if isinstance(e, dict):
+                    a_e = e.get('adult', 0.0)
+                    c_e = e.get('child', 0.0)
+                    e_display = f"A={a_e:.4f}"
+                else:
+                    e_display = f"E={e:.4f}"
                 color = state_colors.get(s_val, 'green')
                 label = state_labels.get(s_val, 'empty')
 
                 cell['status_rect'].set_facecolor(color)
-                cell['energy_text'].set_text(f"{label}\nE={e_val:.4f}")
+                cell['energy_text'].set_text(f"{label}\n{e_display}")
                 # 金色背景用深色文字
                 text_color = 'black' if s_val == 1 else 'white'
                 cell['energy_text'].set_color(text_color)
@@ -3861,23 +3915,52 @@ class PlotPanel(tk.Frame):
     def _draw_seating_ellipses(self, ax, params):
         """
         根据 SEAT-OCCUPANCY 配置绘制座椅椭圆, 支持动态着色.
+        成人: 实线, 粗线, 标号;  小孩: 虚线, 细线, 标号+c.
         若配置不存在则回退到论文 Table II 硬编码值.
         """
         occ_cfg = params.get('occupancy_config', None)
+        self._has_child_ellipses = False
+        self._seat_adult_patches = {}
+        self._seat_child_patches = {}
+        self._seat_texts = {}
 
         if occ_cfg:
             seat_type = occ_cfg.get('seat_type', '4_seats')
             key = 'seats_4' if seat_type == '4_seats' else 'seats_5'
             seat_defs = occ_cfg.get(key, occ_cfg.get('seats_4', []))
-            seats = []
+
             for sd in seat_defs:
-                seats.append({
-                    'center': (sd['cx'], sd['cy']),
-                    'rx': sd['rx'], 'ry': sd['ry'],
-                    'name': sd['name'],
-                })
+                name = sd['name']
+                # --- 成人椭圆: 实线 ---
+                adult = sd.get('adult', sd)
+                a_ellipse = patches.Ellipse(
+                    (adult['cx'], adult['cy']),
+                    width=adult['rx'] * 2, height=adult['ry'] * 2,
+                    edgecolor='green', facecolor='none',
+                    linestyle='-', linewidth=2.5, alpha=0.8
+                )
+                ax.add_patch(a_ellipse)
+                self._seat_adult_patches[name] = a_ellipse
+
+                # --- 小孩椭圆: 虚线 (仅在有 child 子配置时) ---
+                child = sd.get('child', None)
+                if child is not None:
+                    self._has_child_ellipses = True
+                    c_ellipse = patches.Ellipse(
+                        (child['cx'], child['cy']),
+                        width=child['rx'] * 2, height=child['ry'] * 2,
+                        edgecolor='green', facecolor='none',
+                        linestyle='--', linewidth=1.5, alpha=0.6
+                    )
+                    ax.add_patch(c_ellipse)
+                    self._seat_child_patches[name] = c_ellipse
+
+                # 成人椭圆中心标号
+                txt = ax.text(adult['cx'], adult['cy'], name,
+                              color='green', ha='center', fontweight='bold', fontsize=9)
+                self._seat_texts[name] = txt
         else:
-            # fallback: 原硬编码逻辑
+            # fallback: 原硬编码逻辑 (无小孩椭圆)
             is_5 = (params.get('seat_type') == '5_seats')
             if not is_5:
                 seats = [
@@ -3894,37 +3977,66 @@ class PlotPanel(tk.Frame):
                     {'center': (0, -1.3),    'rx': 0.25, 'ry': 0.2, 'name': '5'},
                     {'center': (0.4, -1.3),  'rx': 0.25, 'ry': 0.2, 'name': '4'},
                 ]
-
-        self._seat_patches = {}
-        self._seat_texts = {}
-        for s in seats:
-            ellipse = patches.Ellipse(
-                s['center'], width=s['rx'] * 2, height=s['ry'] * 2,
-                edgecolor='green', facecolor='none',
-                linestyle='--', linewidth=2.0, alpha=0.8
-            )
-            ax.add_patch(ellipse)
-            txt = ax.text(s['center'][0], s['center'][1], s['name'],
-                          color='green', ha='center', fontweight='bold')
-            self._seat_patches[s['name']] = ellipse
-            self._seat_texts[s['name']] = txt
+            for s in seats:
+                ellipse = patches.Ellipse(
+                    s['center'], width=s['rx'] * 2, height=s['ry'] * 2,
+                    edgecolor='green', facecolor='none',
+                    linestyle='-', linewidth=2.0, alpha=0.8
+                )
+                ax.add_patch(ellipse)
+                txt = ax.text(s['center'][0], s['center'][1], s['name'],
+                              color='green', ha='center', fontweight='bold')
+                self._seat_adult_patches[s['name']] = ellipse
+                self._seat_texts[s['name']] = txt
 
     def _update_seat_colors(self, occupancy):
-        """根据占用状态更新椭圆颜色: 占用=红, 空闲=绿"""
-        if not hasattr(self, '_seat_patches'):
+        """根据三态占用状态更新椭圆颜色: 2=成人=红, 1=儿童=金, 0=空闲=绿.
+        成人椭圆始终为实线, 小孩椭圆始终为虚线."""
+        # 兼容旧的 _seat_patches 属性 (其他模式如 POINT-CLOUD)
+        if hasattr(self, '_seat_patches') and self._seat_patches:
+            for name, patch in self._seat_patches.items():
+                occ = occupancy.get(name, 0) if isinstance(occupancy, dict) else 0
+                if occ == 2:
+                    color, lw = 'red', 3.0
+                elif occ == 1:
+                    color, lw = 'gold', 2.5
+                else:
+                    color, lw = 'green', 2.0
+                patch.set_edgecolor(color)
+                patch.set_linewidth(lw)
+                if name in self._seat_texts:
+                    self._seat_texts[name].set_color(color)
             return
-        for name, patch in self._seat_patches.items():
-            occ = occupancy.get(name, 2) if isinstance(occupancy, dict) else 0
-            if occ == 1:
-                patch.set_edgecolor('red')
-                patch.set_linewidth(3.0)
-                if name in self._seat_texts:
-                    self._seat_texts[name].set_color('red')
-            else:
-                patch.set_edgecolor('green')
-                patch.set_linewidth(2.0)
-                if name in self._seat_texts:
-                    self._seat_texts[name].set_color('green')
+
+        # 新的双椭圆模式
+        if not hasattr(self, '_seat_adult_patches') or not self._seat_adult_patches:
+            return
+        for name, a_patch in self._seat_adult_patches.items():
+            occ = occupancy.get(name, 0) if isinstance(occupancy, dict) else 0
+            c_patch = self._seat_child_patches.get(name) if hasattr(self, '_seat_child_patches') else None
+
+            if occ == 2:          # 成人: 成人圈红粗, 小孩圈灰细
+                a_patch.set_edgecolor('red')
+                a_patch.set_linewidth(3.0)
+                if c_patch:
+                    c_patch.set_edgecolor('#cccccc')
+                    c_patch.set_linewidth(1.0)
+            elif occ == 1:        # 儿童: 成人圈绿, 小孩圈金
+                a_patch.set_edgecolor('green')
+                a_patch.set_linewidth(2.0)
+                if c_patch:
+                    c_patch.set_edgecolor('gold')
+                    c_patch.set_linewidth(2.0)
+            else:                 # 空闲: 两圈皆绿
+                a_patch.set_edgecolor('green')
+                a_patch.set_linewidth(2.0)
+                if c_patch:
+                    c_patch.set_edgecolor('green')
+                    c_patch.set_linewidth(1.5)
+
+            if name in self._seat_texts:
+                self._seat_texts[name].set_color(
+                    'red' if occ == 2 else ('gold' if occ == 1 else 'green'))
 
 # ==============================================================================
 # 6.6 座椅配置对话框
@@ -3935,7 +4047,7 @@ class SeatConfigDialog(tk.Toplevel):
     def __init__(self, parent, occ_params, callback):
         super().__init__(parent)
         self.title("座椅占用检测配置")
-        self.minsize(520, 480)
+        self.minsize(950, 480)
         self.resizable(True, True)
         self.occ_params = occ_params.copy()
         self.callback = callback
@@ -3968,65 +4080,84 @@ class SeatConfigDialog(tk.Toplevel):
         self.var_hold = tk.StringVar(value='2.0')
         tk.Spinbox(top, textvariable=self.var_hold, from_=0.0, to=30.0, increment=0.5, width=5).grid(row=0, column=8)
 
-        tk.Label(top, text="成人阈值(RA):").grid(row=1, column=0, padx=(5, 2), pady=(5, 2))
-        self.var_adult_th = tk.StringVar(value='0.02')
-        tk.Spinbox(top, textvariable=self.var_adult_th, from_=0.0, to=1.0, increment=0.001, width=6).grid(row=1, column=1, padx=2, pady=(5, 2), sticky='w')
-
         # 座椅参数卡片 (4 或 5 个)
-        seat_frame = tk.LabelFrame(self, text="座椅参数 (cx/cy=坐标, rx/ry=半轴, TH=点云阈值, baseline=RA空房基线, ratio=RA峰值比)", padx=10, pady=5)
+        seat_frame = tk.LabelFrame(self, text="座椅参数 (A=成人 C=小孩: cx/cy=坐标, rx/ry=半轴, th=能量阈值)", padx=10, pady=5)
         seat_frame.pack(fill='both', expand=True, padx=10, pady=5)
 
-        # 画布+滚动条
+        # 画布+滚动条 (水平+垂直)
         canvas = tk.Canvas(seat_frame, height=280)
-        scrollbar = ttk.Scrollbar(seat_frame, orient='vertical', command=canvas.yview)
+        h_scrollbar = ttk.Scrollbar(seat_frame, orient='horizontal', command=canvas.xview)
+        v_scrollbar = ttk.Scrollbar(seat_frame, orient='vertical', command=canvas.yview)
         self.seat_inner = tk.Frame(canvas)
         self.seat_inner.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
         canvas.create_window((0, 0), window=self.seat_inner, anchor='nw')
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
+        canvas.configure(xscrollcommand=h_scrollbar.set, yscrollcommand=v_scrollbar.set)
+        canvas.grid(row=0, column=0, sticky='nsew')
+        v_scrollbar.grid(row=0, column=1, sticky='ns')
+        h_scrollbar.grid(row=1, column=0, sticky='ew')
+        seat_frame.rowconfigure(0, weight=1)
+        seat_frame.columnconfigure(0, weight=1)
 
-        # 表头
-        headers = ['座椅', '名称', '中心X\ncx (m)', '中心Y\ncy (m)',
-                   '半轴X\nrx (m)', '半轴Y\nry (m)', '阈值\nTH',
-                   'RA基线\nbaseline', 'RA峰值比\nratio']
-        for j, h in enumerate(headers):
+        # 表头: 14列
+        headers = ['座椅', '名称', 'RA峰值比\nratio',
+                   'A-cx', 'A-cy', 'A-rx', 'A-ry', 'A-阈值',
+                   'C-cx', 'C-cy', 'C-rx', 'C-ry', 'C-阈值下', 'C-阈值上']
+        col_widths = [5, 4, 7] + [5]*11
+        for j, (h, w) in enumerate(zip(headers, col_widths)):
             tk.Label(self.seat_inner, text=h, font=('Arial', 7, 'bold'),
-                     width=8, anchor='center', relief='ridge', bg='#e0e0e0').grid(row=0, column=j, padx=1, pady=1)
+                     width=w, anchor='center', relief='ridge', bg='#e0e0e0').grid(row=0, column=j, padx=1, pady=1)
 
         # 为 5 个座椅各建一行控件 (4座显示前4行, 5座显示全部)
         self.seat_vars = []
         for i in range(5):
-            row_vars = {}
-            tk.Label(self.seat_inner, text=f"座椅{i+1}", anchor='center').grid(row=i+1, column=0, padx=1, pady=1)
+            tk.Label(self.seat_inner, text=f"座椅{i+1}", anchor='center', font=('Arial', 8)).grid(row=i+1, column=0, padx=1, pady=1)
 
             v_name = tk.StringVar(value=str(i+1))
             tk.Entry(self.seat_inner, textvariable=v_name, width=4).grid(row=i+1, column=1, padx=1)
 
-            v_cx = tk.StringVar(value='0.0')
-            tk.Spinbox(self.seat_inner, textvariable=v_cx, from_=-3.0, to=3.0, increment=0.05, width=5).grid(row=i+1, column=2, padx=1)
-
-            v_cy = tk.StringVar(value='0.0')
-            tk.Spinbox(self.seat_inner, textvariable=v_cy, from_=-3.0, to=0.0, increment=0.05, width=5).grid(row=i+1, column=3, padx=1)
-
-            v_rx = tk.StringVar(value='0.2')
-            tk.Spinbox(self.seat_inner, textvariable=v_rx, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=4, padx=1)
-
-            v_ry = tk.StringVar(value='0.2')
-            tk.Spinbox(self.seat_inner, textvariable=v_ry, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=5, padx=1)
-
-            v_th = tk.StringVar(value='0.01')
-            tk.Spinbox(self.seat_inner, textvariable=v_th, from_=0.001, to=0.5, increment=0.001, width=5).grid(row=i+1, column=6, padx=1)
-
-            v_ra_bl = tk.StringVar(value='0.001')
-            tk.Spinbox(self.seat_inner, textvariable=v_ra_bl, from_=0.0, to=10.0, increment=0.001, width=5).grid(row=i+1, column=7, padx=1)
-
             v_ra_ratio = tk.StringVar(value='0.3')
-            tk.Spinbox(self.seat_inner, textvariable=v_ra_ratio, from_=0.0, to=1.0, increment=0.05, width=5).grid(row=i+1, column=8, padx=1)
+            tk.Spinbox(self.seat_inner, textvariable=v_ra_ratio, from_=0.0, to=1.0, increment=0.05, width=5).grid(row=i+1, column=2, padx=1)
 
-            self.seat_vars.append({'name': v_name, 'cx': v_cx, 'cy': v_cy,
-                                    'rx': v_rx, 'ry': v_ry, 'th': v_th,
-                                    'ra_baseline': v_ra_bl, 'ra_peak_ratio': v_ra_ratio})
+            # Adult 参数
+            v_a_cx = tk.StringVar(value='0.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_a_cx, from_=-3.0, to=3.0, increment=0.05, width=5).grid(row=i+1, column=3, padx=1)
+
+            v_a_cy = tk.StringVar(value='0.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_a_cy, from_=-3.0, to=0.0, increment=0.05, width=5).grid(row=i+1, column=4, padx=1)
+
+            v_a_rx = tk.StringVar(value='0.2')
+            tk.Spinbox(self.seat_inner, textvariable=v_a_rx, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=5, padx=1)
+
+            v_a_ry = tk.StringVar(value='0.2')
+            tk.Spinbox(self.seat_inner, textvariable=v_a_ry, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=6, padx=1)
+
+            v_a_th = tk.StringVar(value='0.02')
+            tk.Spinbox(self.seat_inner, textvariable=v_a_th, from_=0.0, to=1.0, increment=0.001, width=5).grid(row=i+1, column=7, padx=1)
+
+            # Child 参数
+            v_c_cx = tk.StringVar(value='0.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_c_cx, from_=-3.0, to=3.0, increment=0.05, width=5).grid(row=i+1, column=8, padx=1)
+
+            v_c_cy = tk.StringVar(value='0.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_c_cy, from_=-3.0, to=0.0, increment=0.05, width=5).grid(row=i+1, column=9, padx=1)
+
+            v_c_rx = tk.StringVar(value='0.15')
+            tk.Spinbox(self.seat_inner, textvariable=v_c_rx, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=10, padx=1)
+
+            v_c_ry = tk.StringVar(value='0.15')
+            tk.Spinbox(self.seat_inner, textvariable=v_c_ry, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=11, padx=1)
+
+            v_c_th_lo = tk.StringVar(value='0.05')
+            tk.Spinbox(self.seat_inner, textvariable=v_c_th_lo, from_=0.0, to=100.0, increment=0.01, width=5).grid(row=i+1, column=12, padx=1)
+
+            v_c_th_hi = tk.StringVar(value='5.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_c_th_hi, from_=0.0, to=100.0, increment=0.1, width=5).grid(row=i+1, column=13, padx=1)
+
+            self.seat_vars.append({
+                'name': v_name, 'ra_peak_ratio': v_ra_ratio,
+                'adult': {'cx': v_a_cx, 'cy': v_a_cy, 'rx': v_a_rx, 'ry': v_a_ry, 'threshold': v_a_th},
+                'child': {'cx': v_c_cx, 'cy': v_c_cy, 'rx': v_c_rx, 'ry': v_c_ry, 'threshold_low': v_c_th_lo, 'threshold_high': v_c_th_hi},
+            })
 
         # 底部按钮
         btn_row = tk.Frame(self, pady=10)
@@ -4046,7 +4177,6 @@ class SeatConfigDialog(tk.Toplevel):
         self.var_smooth.set(str(p.get('smooth_window', 3)))
         self.var_smooth_th.set(str(p.get('smooth_threshold', 0.5)))
         self.var_hold.set(str(p.get('hold_time_sec', 2.0)))
-        self.var_adult_th.set(str(p.get('adult_threshold', 0.02)))
 
         key = 'seats_4' if self.var_seat_type.get() == '4_seats' else 'seats_5'
         seats = p.get(key, p.get('seats_4', []))
@@ -4054,13 +4184,20 @@ class SeatConfigDialog(tk.Toplevel):
             if i < len(seats):
                 s = seats[i]
                 sv['name'].set(s.get('name', str(i+1)))
-                sv['cx'].set(str(s.get('cx', 0.0)))
-                sv['cy'].set(str(s.get('cy', 0.0)))
-                sv['rx'].set(str(s.get('rx', 0.2)))
-                sv['ry'].set(str(s.get('ry', 0.2)))
-                sv['th'].set(str(s.get('th', 0.01)))
-                sv['ra_baseline'].set(str(s.get('ra_baseline', 0.001)))
                 sv['ra_peak_ratio'].set(str(s.get('ra_peak_ratio', 0.3)))
+                adult = s.get('adult', s)  # fallback 兼容旧配置
+                sv['adult']['cx'].set(str(adult.get('cx', 0.0)))
+                sv['adult']['cy'].set(str(adult.get('cy', 0.0)))
+                sv['adult']['rx'].set(str(adult.get('rx', 0.2)))
+                sv['adult']['ry'].set(str(adult.get('ry', 0.2)))
+                sv['adult']['threshold'].set(str(adult.get('threshold', 0.02)))
+                child = s.get('child', s)
+                sv['child']['cx'].set(str(child.get('cx', 0.0)))
+                sv['child']['cy'].set(str(child.get('cy', 0.0)))
+                sv['child']['rx'].set(str(child.get('rx', 0.15)))
+                sv['child']['ry'].set(str(child.get('ry', 0.15)))
+                sv['child']['threshold_low'].set(str(child.get('threshold_low', 0.05)))
+                sv['child']['threshold_high'].set(str(child.get('threshold_high', 5.0)))
 
     def _save(self):
         """从 UI 控件写回 occ_params 字典, 执行回调"""
@@ -4071,7 +4208,6 @@ class SeatConfigDialog(tk.Toplevel):
             p['smooth_window'] = int(self.var_smooth.get())
             p['smooth_threshold'] = float(self.var_smooth_th.get())
             p['hold_time_sec'] = float(self.var_hold.get())
-            p['adult_threshold'] = float(self.var_adult_th.get())
         except ValueError:
             pass
 
@@ -4083,13 +4219,22 @@ class SeatConfigDialog(tk.Toplevel):
             try:
                 seat_list.append({
                     'name': sv['name'].get(),
-                    'cx': float(sv['cx'].get()),
-                    'cy': float(sv['cy'].get()),
-                    'rx': float(sv['rx'].get()),
-                    'ry': float(sv['ry'].get()),
-                    'th': float(sv['th'].get()),
-                    'ra_baseline': float(sv['ra_baseline'].get()),
                     'ra_peak_ratio': float(sv['ra_peak_ratio'].get()),
+                    'adult': {
+                        'cx': float(sv['adult']['cx'].get()),
+                        'cy': float(sv['adult']['cy'].get()),
+                        'rx': float(sv['adult']['rx'].get()),
+                        'ry': float(sv['adult']['ry'].get()),
+                        'threshold': float(sv['adult']['threshold'].get()),
+                    },
+                    'child': {
+                        'cx': float(sv['child']['cx'].get()),
+                        'cy': float(sv['child']['cy'].get()),
+                        'rx': float(sv['child']['rx'].get()),
+                        'ry': float(sv['child']['ry'].get()),
+                        'threshold_low': float(sv['child']['threshold_low'].get()),
+                        'threshold_high': float(sv['child']['threshold_high'].get()),
+                    },
                 })
             except ValueError:
                 continue
@@ -4726,8 +4871,8 @@ class App:
                 elif m == 'RA-OCCUPANCY':
                     d = self.algo_processor.step_ra_occupancy()
                     if d:
-                        occ, _, state = self.ra_occupancy_detector.process(d['energy'])
-                        d['occupancy'] = occ
+                        _, _, state = self.ra_occupancy_detector.process(d['energy'])
+                        d['occupancy'] = state  # 三态: 0=empty, 1=child, 2=adult (供着色)
                         d['state'] = state
                 elif m == 'ANGLE-SPECTRUM':
                     d = self.algo_processor.step_angle_spectrum_view()

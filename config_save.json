@@ -676,7 +676,7 @@
     },
     "RA-OCCUPANCY": {
       "center_freq": 7987200000.0,
-      "snapshots": 576,
+      "snapshots": 144,
       "cir_combine_num": 9,
       "leakage_offset": 5,
       "doppler_window": "chebyshev",
@@ -724,91 +724,177 @@
         "seats_4": [
           {
             "name": "1",
-            "cx": -0.3,
-            "cy": -0.45,
-            "rx": 0.2,
-            "ry": 0.2,
-            "th": 0.015,
-            "ra_baseline": 0.5,
-            "ra_peak_ratio": 0.3
+            "ra_peak_ratio": 0.3,
+            "adult": {
+              "cx": -0.25,
+              "cy": -0.45,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 0.8
+            },
+            "child": {
+              "cx": -0.3,
+              "cy": -1.35,
+              "rx": 0.25,
+              "ry": 0.6,
+              "threshold_low": 0.01,
+              "threshold_high": 0.8
+            }
           },
           {
             "name": "2",
-            "cx": 0.3,
-            "cy": -0.45,
-            "rx": 0.2,
-            "ry": 0.2,
-            "th": 0.015,
-            "ra_baseline": 0.5,
-            "ra_peak_ratio": 0.3
+            "ra_peak_ratio": 0.3,
+            "adult": {
+              "cx": 0.25,
+              "cy": -0.45,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 0.8
+            },
+            "child": {
+              "cx": 0.3,
+              "cy": -1.35,
+              "rx": 0.25,
+              "ry": 0.6,
+              "threshold_low": 0.01,
+              "threshold_high": 0.8
+            }
           },
           {
             "name": "3",
-            "cx": -0.3,
-            "cy": -1.2,
-            "rx": 0.2,
-            "ry": 0.3,
-            "th": 0.015,
-            "ra_baseline": 0.5,
-            "ra_peak_ratio": 0.3
+            "ra_peak_ratio": 0.3,
+            "adult": {
+              "cx": -0.4,
+              "cy": -1.2,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 0.4
+            },
+            "child": {
+              "cx": -0.4,
+              "cy": -1.2,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold_low": 10.0,
+              "threshold_high": 2.5
+            }
           },
           {
             "name": "4",
-            "cx": 0.3,
-            "cy": -1.2,
-            "rx": 0.2,
-            "ry": 0.3,
-            "th": 0.015,
-            "ra_baseline": 0.5,
-            "ra_peak_ratio": 0.3
+            "ra_peak_ratio": 0.3,
+            "adult": {
+              "cx": 0.4,
+              "cy": -1.2,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 0.4
+            },
+            "child": {
+              "cx": 0.4,
+              "cy": -1.2,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold_low": 10.0,
+              "threshold_high": 2.5
+            }
           }
         ],
         "seats_5": [
           {
             "name": "1",
-            "cx": -0.3,
-            "cy": -0.6,
-            "rx": 0.2,
-            "ry": 0.2,
-            "th": 0.01
+            "ra_peak_ratio": 0.3,
+            "adult": {
+              "cx": -0.3,
+              "cy": -0.45,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 2.0
+            },
+            "child": {
+              "cx": -0.3,
+              "cy": -0.8,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 0.15
+            }
           },
           {
             "name": "2",
-            "cx": 0.3,
-            "cy": -0.6,
-            "rx": 0.2,
-            "ry": 0.2,
-            "th": 0.01
+            "ra_peak_ratio": 0.3,
+            "adult": {
+              "cx": 0.3,
+              "cy": -0.45,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 2.0
+            },
+            "child": {
+              "cx": 0.3,
+              "cy": -0.85,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 0.15
+            }
           },
           {
             "name": "3",
-            "cx": -0.3,
-            "cy": -1.4,
-            "rx": 0.2,
-            "ry": 0.2,
-            "th": 0.003
+            "ra_peak_ratio": 0.3,
+            "adult": {
+              "cx": -0.3,
+              "cy": -1.0,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 2.0
+            },
+            "child": {
+              "cx": -0.3,
+              "cy": -1.0,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 2.0
+            }
           },
           {
             "name": "4",
-            "cx": 0.3,
-            "cy": -1.4,
-            "rx": 0.2,
-            "ry": 0.2,
-            "th": 0.003
+            "ra_peak_ratio": 0.3,
+            "adult": {
+              "cx": 0.3,
+              "cy": -1.0,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 2.0
+            },
+            "child": {
+              "cx": 0.3,
+              "cy": -1.0,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 2.0
+            }
           },
           {
             "name": "5",
-            "cx": 0.0,
-            "cy": 0.0,
-            "rx": 0.2,
-            "ry": 0.2,
-            "th": 0.01
+            "ra_peak_ratio": 0.3,
+            "adult": {
+              "cx": 0.0,
+              "cy": 0.0,
+              "rx": 0.2,
+              "ry": 0.2,
+              "threshold": 0.02
+            },
+            "child": {
+              "cx": 0.0,
+              "cy": 0.0,
+              "rx": 0.15,
+              "ry": 0.15,
+              "threshold": 0.01
+            }
           }
         ],
-        "smooth_window": 6,
-        "smooth_threshold": 0.5,
-        "hold_time_sec": 5.0,
-        "adult_threshold": 1.0
+        "smooth_window": 8,
+        "smooth_threshold": 0.675,
+        "hold_time_sec": 2.5,
+        "adult_threshold": 5.0
       }
     },
     "SEAT-OCCUPANCY": {
@@ -817,91 +903,177 @@
       "seats_4": [
         {
           "name": "1",
-          "cx": -0.3,
-          "cy": -0.45,
-          "rx": 0.2,
-          "ry": 0.2,
-          "th": 0.015,
-          "ra_baseline": 0.5,
-          "ra_peak_ratio": 0.3
+          "ra_peak_ratio": 0.3,
+          "adult": {
+            "cx": -0.25,
+            "cy": -0.45,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 0.8
+          },
+          "child": {
+            "cx": -0.3,
+            "cy": -1.35,
+            "rx": 0.25,
+            "ry": 0.6,
+            "threshold_low": 0.01,
+            "threshold_high": 0.8
+          }
         },
         {
           "name": "2",
-          "cx": 0.3,
-          "cy": -0.45,
-          "rx": 0.2,
-          "ry": 0.2,
-          "th": 0.015,
-          "ra_baseline": 0.5,
-          "ra_peak_ratio": 0.3
+          "ra_peak_ratio": 0.3,
+          "adult": {
+            "cx": 0.25,
+            "cy": -0.45,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 0.8
+          },
+          "child": {
+            "cx": 0.3,
+            "cy": -1.35,
+            "rx": 0.25,
+            "ry": 0.6,
+            "threshold_low": 0.01,
+            "threshold_high": 0.8
+          }
         },
         {
           "name": "3",
-          "cx": -0.3,
-          "cy": -1.2,
-          "rx": 0.2,
-          "ry": 0.3,
-          "th": 0.015,
-          "ra_baseline": 0.5,
-          "ra_peak_ratio": 0.3
+          "ra_peak_ratio": 0.3,
+          "adult": {
+            "cx": -0.4,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 0.4
+          },
+          "child": {
+            "cx": -0.4,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold_low": 10.0,
+            "threshold_high": 2.5
+          }
         },
         {
           "name": "4",
-          "cx": 0.3,
-          "cy": -1.2,
-          "rx": 0.2,
-          "ry": 0.3,
-          "th": 0.015,
-          "ra_baseline": 0.5,
-          "ra_peak_ratio": 0.3
+          "ra_peak_ratio": 0.3,
+          "adult": {
+            "cx": 0.4,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 0.4
+          },
+          "child": {
+            "cx": 0.4,
+            "cy": -1.2,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold_low": 10.0,
+            "threshold_high": 2.5
+          }
         }
       ],
       "seats_5": [
         {
           "name": "1",
-          "cx": -0.3,
-          "cy": -0.6,
-          "rx": 0.2,
-          "ry": 0.2,
-          "th": 0.01
+          "ra_peak_ratio": 0.3,
+          "adult": {
+            "cx": -0.3,
+            "cy": -0.45,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 2.0
+          },
+          "child": {
+            "cx": -0.3,
+            "cy": -0.8,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 0.15
+          }
         },
         {
           "name": "2",
-          "cx": 0.3,
-          "cy": -0.6,
-          "rx": 0.2,
-          "ry": 0.2,
-          "th": 0.01
+          "ra_peak_ratio": 0.3,
+          "adult": {
+            "cx": 0.3,
+            "cy": -0.45,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 2.0
+          },
+          "child": {
+            "cx": 0.3,
+            "cy": -0.85,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 0.15
+          }
         },
         {
           "name": "3",
-          "cx": -0.3,
-          "cy": -1.4,
-          "rx": 0.2,
-          "ry": 0.2,
-          "th": 0.003
+          "ra_peak_ratio": 0.3,
+          "adult": {
+            "cx": -0.3,
+            "cy": -1.0,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 2.0
+          },
+          "child": {
+            "cx": -0.3,
+            "cy": -1.0,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 2.0
+          }
         },
         {
           "name": "4",
-          "cx": 0.3,
-          "cy": -1.4,
-          "rx": 0.2,
-          "ry": 0.2,
-          "th": 0.003
+          "ra_peak_ratio": 0.3,
+          "adult": {
+            "cx": 0.3,
+            "cy": -1.0,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 2.0
+          },
+          "child": {
+            "cx": 0.3,
+            "cy": -1.0,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 2.0
+          }
         },
         {
           "name": "5",
-          "cx": 0.0,
-          "cy": 0.0,
-          "rx": 0.2,
-          "ry": 0.2,
-          "th": 0.01
+          "ra_peak_ratio": 0.3,
+          "adult": {
+            "cx": 0.0,
+            "cy": 0.0,
+            "rx": 0.2,
+            "ry": 0.2,
+            "threshold": 0.02
+          },
+          "child": {
+            "cx": 0.0,
+            "cy": 0.0,
+            "rx": 0.15,
+            "ry": 0.15,
+            "threshold": 0.01
+          }
         }
       ],
-      "smooth_window": 6,
-      "smooth_threshold": 0.5,
-      "hold_time_sec": 5.0,
-      "adult_threshold": 1.0
+      "smooth_window": 8,
+      "smooth_threshold": 0.675,
+      "hold_time_sec": 2.5,
+      "adult_threshold": 5.0
     }
   }
 }
