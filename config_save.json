@@ -17,7 +17,7 @@
     "num_tx_antennas": 2,
     "num_rx_antennas": 4,
     "rx_antenna_start_num": 4,
-    "connection_mode": "UDP",
+    "connection_mode": "CAN",
     "serial_port": "COM6",
     "baud_rate": 460800,
     "udp_ip": "127.0.0.1",
@@ -34,7 +34,14 @@
     "recent_save_dirs": [
       "D:/uwb occupy data collection and ai learn/data",
       "./data"
-    ]
+    ],
+    "can_device_type": "ZLGCAN",
+    "mcu_name": "Calterah",
+    "can_packet_size": 320,
+    "can_header_size": 20,
+    "can_cir_data_size": 256,
+    "can_uci_signature": "0f001001",
+    "can_packet_cnt": 4
   },
   "algo_params": {
     "PLOT": {
@@ -701,17 +708,21 @@
       "azimuth_num": 64,
       "ant_calib_en": true,
       "ant_calib_phase": [
-        -0.0,
-        -0.49072375380773364,
-        1.1062868947533422,
-        1.5748289100316295,
-        -0.5876511374160144,
-        -1.9895222818981357,
-        0.12190304520431955,
-        0.5787126081848506
+        0.0,
+        0.19190371,
+        -1.417986,
+        -2.8394966,
+        0.07785571,
+        0.09267139,
+        -1.2703428,
+        -2.6441593
       ],
       "capon_diag_load": 0.001,
       "dist_per_tap": 0.1875,
+      "smooth_kernel": [
+        2,
+        4
+      ],
       "plot_xlim": 1.5,
       "plot_ylim_min": -2.5,
       "plot_ylim_max": -0.1,
@@ -725,77 +736,85 @@
           {
             "name": "1",
             "ra_peak_ratio": 0.3,
-            "adult": {
+            "main": {
               "cx": -0.25,
               "cy": -0.45,
               "rx": 0.2,
-              "ry": 0.2,
-              "threshold": 0.8
+              "ry": 0.2
             },
-            "child": {
+            "adult_threshold": 6.0,
+            "child_threshold_low": 0.01,
+            "child_threshold_high": 6.0,
+            "child_special": {
               "cx": -0.3,
-              "cy": -1.35,
-              "rx": 0.25,
-              "ry": 0.6,
+              "cy": -1.4,
+              "rx": 0.2,
+              "ry": 0.2,
               "threshold_low": 0.01,
-              "threshold_high": 0.8
+              "threshold_high": 0.0
             }
           },
           {
             "name": "2",
             "ra_peak_ratio": 0.3,
-            "adult": {
+            "main": {
               "cx": 0.25,
               "cy": -0.45,
               "rx": 0.2,
-              "ry": 0.2,
-              "threshold": 0.8
+              "ry": 0.2
             },
-            "child": {
+            "adult_threshold": 6.0,
+            "child_threshold_low": 0.01,
+            "child_threshold_high": 6.0,
+            "child_special": {
               "cx": 0.3,
-              "cy": -1.35,
-              "rx": 0.25,
-              "ry": 0.6,
+              "cy": -1.4,
+              "rx": 0.2,
+              "ry": 0.2,
               "threshold_low": 0.01,
-              "threshold_high": 0.8
+              "threshold_high": 0.0
             }
           },
           {
             "name": "3",
             "ra_peak_ratio": 0.3,
-            "adult": {
-              "cx": -0.4,
-              "cy": -1.2,
+            "main": {
+              "cx": -0.6,
+              "cy": -1.3,
               "rx": 0.2,
-              "ry": 0.2,
-              "threshold": 0.4
+              "ry": 0.2
             },
-            "child": {
-              "cx": -0.4,
-              "cy": -1.2,
+            "adult_threshold": 1.0,
+            "child_threshold_low": 10.0,
+            "child_threshold_high": 5.0,
+            "child_special": {
+              "cx": -0.6,
+              "cy": -1.3,
               "rx": 0.2,
               "ry": 0.2,
               "threshold_low": 10.0,
-              "threshold_high": 2.5
+              "threshold_high": 0.1
             }
           },
           {
             "name": "4",
             "ra_peak_ratio": 0.3,
-            "adult": {
-              "cx": 0.4,
-              "cy": -1.2,
+            "main": {
+              "cx": 0.6,
+              "cy": -1.3,
               "rx": 0.2,
-              "ry": 0.2,
-              "threshold": 0.4
+              "ry": 0.2
             },
-            "child": {
-              "cx": 0.4,
-              "cy": -1.2,
+            "adult_threshold": 1.0,
+            "child_threshold_low": 10.0,
+            "child_threshold_high": 5.0,
+            "child_special": {
+              "cx": -0.6,
+              "cy": -1.3,
               "rx": 0.2,
               "ry": 0.2,
               "threshold_low": 10.0,
-              "threshold_high": 2.5
+              "threshold_high": 0.1
             }
           }
         ],
@@ -904,77 +923,85 @@
         {
           "name": "1",
           "ra_peak_ratio": 0.3,
-          "adult": {
+          "main": {
             "cx": -0.25,
             "cy": -0.45,
             "rx": 0.2,
-            "ry": 0.2,
-            "threshold": 0.8
+            "ry": 0.2
           },
-          "child": {
+          "adult_threshold": 6.0,
+          "child_threshold_low": 0.01,
+          "child_threshold_high": 6.0,
+          "child_special": {
             "cx": -0.3,
-            "cy": -1.35,
-            "rx": 0.25,
-            "ry": 0.6,
+            "cy": -1.4,
+            "rx": 0.2,
+            "ry": 0.2,
             "threshold_low": 0.01,
-            "threshold_high": 0.8
+            "threshold_high": 0.0
           }
         },
         {
           "name": "2",
           "ra_peak_ratio": 0.3,
-          "adult": {
+          "main": {
             "cx": 0.25,
             "cy": -0.45,
             "rx": 0.2,
-            "ry": 0.2,
-            "threshold": 0.8
+            "ry": 0.2
           },
-          "child": {
+          "adult_threshold": 6.0,
+          "child_threshold_low": 0.01,
+          "child_threshold_high": 6.0,
+          "child_special": {
             "cx": 0.3,
-            "cy": -1.35,
-            "rx": 0.25,
-            "ry": 0.6,
+            "cy": -1.4,
+            "rx": 0.2,
+            "ry": 0.2,
             "threshold_low": 0.01,
-            "threshold_high": 0.8
+            "threshold_high": 0.0
           }
         },
         {
           "name": "3",
           "ra_peak_ratio": 0.3,
-          "adult": {
-            "cx": -0.4,
-            "cy": -1.2,
+          "main": {
+            "cx": -0.6,
+            "cy": -1.3,
             "rx": 0.2,
-            "ry": 0.2,
-            "threshold": 0.4
+            "ry": 0.2
           },
-          "child": {
-            "cx": -0.4,
-            "cy": -1.2,
+          "adult_threshold": 1.0,
+          "child_threshold_low": 10.0,
+          "child_threshold_high": 5.0,
+          "child_special": {
+            "cx": -0.6,
+            "cy": -1.3,
             "rx": 0.2,
             "ry": 0.2,
             "threshold_low": 10.0,
-            "threshold_high": 2.5
+            "threshold_high": 0.1
           }
         },
         {
           "name": "4",
           "ra_peak_ratio": 0.3,
-          "adult": {
-            "cx": 0.4,
-            "cy": -1.2,
+          "main": {
+            "cx": 0.6,
+            "cy": -1.3,
             "rx": 0.2,
-            "ry": 0.2,
-            "threshold": 0.4
+            "ry": 0.2
           },
-          "child": {
-            "cx": 0.4,
-            "cy": -1.2,
+          "adult_threshold": 1.0,
+          "child_threshold_low": 10.0,
+          "child_threshold_high": 5.0,
+          "child_special": {
+            "cx": -0.6,
+            "cy": -1.3,
             "rx": 0.2,
             "ry": 0.2,
             "threshold_low": 10.0,
-            "threshold_high": 2.5
+            "threshold_high": 0.1
           }
         }
       ],

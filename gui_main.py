@@ -19,7 +19,8 @@ from typing import List, Dict, Tuple, Optional, Any
 from collections import deque
 from scipy import ndimage, signal
 from scipy.signal.windows import chebwin
-
+from device_management import *
+from CAN_data_listen import CANFrameServer, radar_hardware_init
 # --- External Modules ---
 from UDP_data_listen import UDPFrameServer
 import util 
@@ -58,6 +59,8 @@ _SAVE_FIELDS = [
     'current_layout_name', 'current_algo', 'snapshot_rate', 'tap_interval_si',
     'data_save_dir', 'record_filename', 'record_duration',
     'playback_duration', 'export_pc_json', 'recent_save_dirs',
+    'can_device_type', 'mcu_name', 'can_packet_size', 'can_header_size',
+    'can_cir_data_size', 'can_uci_signature', 'can_packet_cnt',
 ]
 
 def save_config(config):
@@ -405,6 +408,8 @@ DEFAULT_ALGO_PARAMS = {
         "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "capon_diag_load": 1e-3,
         "dist_per_tap": 0.1875,
+        # ---- 后处理 ----
+        "smooth_kernel": [2, 4],        # 卷积平滑核大小 [rows, cols], 可调
         # ---- 可视化 ----
         "plot_xlim": 1.5,
         "plot_ylim_min": -2.5,
@@ -419,34 +424,61 @@ DEFAULT_ALGO_PARAMS = {
         "seat_type": "4_seats",
         "seats_4": [
             {"name": "1", "ra_peak_ratio": 0.3,
-             "adult": {"cx": -0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "threshold": 0.02},
-             "child": {"cx": -0.25, "cy": -0.70, "rx": 0.15, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+             "main": {"cx": -0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20},
+             "adult_threshold": 0.02,
+             "child_threshold_low": 0.05, "child_threshold_high": 5.0,
+             "child_special": {"cx": -0.25, "cy": -0.70, "rx": 0.15, "ry": 0.15,
+                               "threshold_low": 0.05, "threshold_high": 5.0}},
             {"name": "2", "ra_peak_ratio": 0.3,
-             "adult": {"cx":  0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20, "threshold": 0.02},
-             "child": {"cx":  0.25, "cy": -0.70, "rx": 0.15, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+             "main": {"cx":  0.30, "cy": -0.60, "rx": 0.20, "ry": 0.20},
+             "adult_threshold": 0.02,
+             "child_threshold_low": 0.05, "child_threshold_high": 5.0,
+             "child_special": {"cx":  0.25, "cy": -0.70, "rx": 0.15, "ry": 0.15,
+                               "threshold_low": 0.05, "threshold_high": 5.0}},
             {"name": "3", "ra_peak_ratio": 0.3,
-             "adult": {"cx": -0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "threshold": 0.02},
-             "child": {"cx": -0.25, "cy": -1.50, "rx": 0.15, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+             "main": {"cx": -0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20},
+             "adult_threshold": 0.02,
+             "child_threshold_low": 0.05, "child_threshold_high": 5.0,
+             "child_special": {"cx": -0.25, "cy": -1.50, "rx": 0.15, "ry": 0.15,
+                               "threshold_low": 0.05, "threshold_high": 5.0}},
             {"name": "4", "ra_peak_ratio": 0.3,
-             "adult": {"cx":  0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20, "threshold": 0.02},
-             "child": {"cx":  0.25, "cy": -1.50, "rx": 0.15, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+             "main": {"cx":  0.30, "cy": -1.40, "rx": 0.20, "ry": 0.20},
+             "adult_threshold": 0.02,
+             "child_threshold_low": 0.05, "child_threshold_high": 5.0,
+             "child_special": {"cx":  0.25, "cy": -1.50, "rx": 0.15, "ry": 0.15,
+                               "threshold_low": 0.05, "threshold_high": 5.0}},
         ],
         "seats_5": [
             {"name": "1", "ra_peak_ratio": 0.3,
-             "adult": {"cx": -0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "threshold": 0.02},
-             "child": {"cx": -0.25, "cy": -0.60, "rx": 0.19, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+             "main": {"cx": -0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20},
+             "adult_threshold": 0.02,
+             "child_threshold_low": 0.05, "child_threshold_high": 5.0,
+             "child_special": {"cx": -0.25, "cy": -0.60, "rx": 0.19, "ry": 0.15,
+                               "threshold_low": 0.05, "threshold_high": 5.0}},
             {"name": "2", "ra_peak_ratio": 0.3,
-             "adult": {"cx":  0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20, "threshold": 0.02},
-             "child": {"cx":  0.25, "cy": -0.60, "rx": 0.19, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+             "main": {"cx":  0.30, "cy": -0.50, "rx": 0.25, "ry": 0.20},
+             "adult_threshold": 0.02,
+             "child_threshold_low": 0.05, "child_threshold_high": 5.0,
+             "child_special": {"cx":  0.25, "cy": -0.60, "rx": 0.19, "ry": 0.15,
+                               "threshold_low": 0.05, "threshold_high": 5.0}},
             {"name": "3", "ra_peak_ratio": 0.3,
-             "adult": {"cx": -0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "threshold": 0.02},
-             "child": {"cx": -0.35, "cy": -1.40, "rx": 0.13, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+             "main": {"cx": -0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20},
+             "adult_threshold": 0.02,
+             "child_threshold_low": 0.05, "child_threshold_high": 5.0,
+             "child_special": {"cx": -0.35, "cy": -1.40, "rx": 0.13, "ry": 0.15,
+                               "threshold_low": 0.05, "threshold_high": 5.0}},
             {"name": "4", "ra_peak_ratio": 0.3,
-             "adult": {"cx":  0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20, "threshold": 0.02},
-             "child": {"cx":  0.35, "cy": -1.40, "rx": 0.13, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+             "main": {"cx":  0.40, "cy": -1.30, "rx": 0.17, "ry": 0.20},
+             "adult_threshold": 0.02,
+             "child_threshold_low": 0.05, "child_threshold_high": 5.0,
+             "child_special": {"cx":  0.35, "cy": -1.40, "rx": 0.13, "ry": 0.15,
+                               "threshold_low": 0.05, "threshold_high": 5.0}},
             {"name": "5", "ra_peak_ratio": 0.3,
-             "adult": {"cx":  0.00, "cy": -1.30, "rx": 0.17, "ry": 0.20, "threshold": 0.02},
-             "child": {"cx":  0.00, "cy": -1.40, "rx": 0.13, "ry": 0.15, "threshold_low": 0.05, "threshold_high": 5.0}},
+             "main": {"cx":  0.00, "cy": -1.30, "rx": 0.17, "ry": 0.20},
+             "adult_threshold": 0.02,
+             "child_threshold_low": 0.05, "child_threshold_high": 5.0,
+             "child_special": {"cx":  0.00, "cy": -1.40, "rx": 0.13, "ry": 0.15,
+                               "threshold_low": 0.05, "threshold_high": 5.0}},
         ],
         "smooth_window": 3,
         "smooth_threshold": 0.5,
@@ -482,10 +514,20 @@ class RadarProtocol:
 
 class ConfigAdapter:
     def __init__(self, dynamic_config):
+        # UDP 字段
         self.UDP_IP = dynamic_config.udp_ip; self.UDP_PORT = dynamic_config.udp_port
         self.UDP_TX_LIST = dynamic_config.udp_tx_list; self.UDP_RX_LIST = dynamic_config.udp_rx_list
         self.FT_LEN = dynamic_config.ft_len
         self.START_SIGN = RadarProtocol.START_SIGN; self.STOP_SIGN = RadarProtocol.STOP_SIGN
+        # CAN 字段 (CANFrameServer 使用不同命名，桥接过来)
+        self.TX_LIST = dynamic_config.udp_tx_list
+        self.RX_LIST = dynamic_config.udp_rx_list
+        self.MCU_NAME = dynamic_config.mcu_name
+        self.PACKET_SIZE = dynamic_config.can_packet_size
+        self.HEADER_SIZE = dynamic_config.can_header_size
+        self.CIR_DATA_SIZE = dynamic_config.can_cir_data_size
+        self.UCI_SIGNATURE = bytes.fromhex(dynamic_config.can_uci_signature)
+        self.PACKET_CNT = dynamic_config.can_packet_cnt
 
 @dataclass
 class RadarConfig:
@@ -499,12 +541,21 @@ class RadarConfig:
     num_rx_antennas: int = 4
     rx_antenna_start_num: int = 4
     
-    connection_mode: str = "UDP"
+    connection_mode: str = "UDP"  # "UDP", "SERIAL", "CAN", "PLAYBACK"
     serial_port: str = "COM6"
     baud_rate: int = 460800
     udp_ip: str = "127.0.0.1"
     udp_port: int = 55555
-    
+
+    # CAN 通信参数
+    can_device_type: str = "ZLGCAN"       # "ZLGCAN" 或 "TOOMOSS"
+    mcu_name: str = "Calterah"            # "Calterah" 或 "29D6"
+    can_packet_size: int = 320            # 完整传输单元大小 (多个 CAN 帧拼成)
+    can_header_size: int = 20             # UCI(4B) + Payload Header(16B)
+    can_cir_data_size: int = 256          # CIR 数据区字节数
+    can_uci_signature: str = "0f001001"   # UCI 同步头 (hex 字符串, 不含空格)
+    can_packet_cnt: int = 4               # 每快照的分块数
+
     # --- 天线位置 ---
     tx_positions: List[List[float]] = field(default_factory=list)
     rx_positions: List[List[float]] = field(default_factory=list)
@@ -1811,7 +1862,9 @@ class AlgorithmProcessor:
         xn = (x - seat['cx']) / seat['rx']
         yn = (y - seat['cy']) / seat['ry']
         mask = (xn * xn + yn * yn) < 1.0
-        return float(np.mean(H[mask]))
+        if not np.any(mask):
+            return 0.0
+        return float(np.max(H[mask]))
 
     def _ra_to_cartesian(self, H, ranges_m, angles_deg,
                           x_range=(-3, 3), y_range=(-6, 0), res=0.05):
@@ -1847,11 +1900,16 @@ class AlgorithmProcessor:
         H, ranges_m, angles_deg, _, _ = self._compute_ra_heatmap(params)
         if H is None:
             return None
-
+        # H = np.fliplr(H)
         # 背景减除: H_bg = H - mean(H²), clip to >=0
         H_sq_mean = np.sqrt(np.sum(np.square(H)) / (H.shape[0] * H.shape[1]))
         # H_sq_mean = np.sum(H) / (H.shape[0] * H.shape[1])
         H_bg = H - H_sq_mean
+
+        # 卷积平滑: 用均值核做 2D 卷积, 保持图像尺寸不变
+        kernel_size = params.get('smooth_kernel', [2, 4])
+        smooth_kernel = np.ones((kernel_size[0], kernel_size[1])) / (kernel_size[0] * kernel_size[1])
+        H_bg = ndimage.convolve(H_bg, smooth_kernel, mode='reflect')
 
         # 每座位能量和
         occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
@@ -1862,9 +1920,9 @@ class AlgorithmProcessor:
         energy_dict = {}
         for seat in seat_defs:
             name = seat['name']
-            adult_e = self._seat_ra_energy(H_bg, ranges_m, angles_deg, seat.get('adult', seat))
-            child_e = self._seat_ra_energy(H_bg, ranges_m, angles_deg, seat.get('child', seat))
-            energy_dict[name] = {'adult': adult_e, 'child': child_e}
+            main_e = self._seat_ra_energy(H_bg, ranges_m, angles_deg, seat.get('main', seat))
+            special_e = self._seat_ra_energy(H_bg, ranges_m, angles_deg, seat.get('child_special', seat))
+            energy_dict[name] = {'main': main_e, 'child_special': special_e}
 
         # Cartesian 重映射 (直接使用背景减除后的 H_bg 线性功率)
         xlim = params.get('plot_xlim', 1.5)
@@ -3076,12 +3134,17 @@ class SeatOccupancyDetector:
 class RAOccupancyDetector:
     """
     RA热力图能量占位检测器 (无 CFAR / 无点云).
-    每座位含 ADULT 和 CHILD 两套椭圆, 分别计算 Capon 能量, 双条件判决 + 时序平滑.
 
-    判决逻辑:
-      ADULT: adult_e > adult.threshold AND adult_e >= ra_peak_ratio * max(所有座位 adult_e) → state=2
-      CHILD: child_e > child.threshold (仅成人不满足时) → state=1
-      否则 state=0 → 经滑动窗口平滑输出.
+    新决策逻辑:
+      主检测区 (main, 合并后 = 原 adult 椭圆几何):
+        ADULT:  main_max > adult_threshold  AND  main_max >= ra_peak_ratio * max(所有座位 main_max) → state=2
+        CHILD:  child_threshold_low < main_max < child_threshold_high (无 ratio 条件) → state=1
+        否则 → state=0
+
+      特判区 (child_special = 原 child 椭圆):
+        spec_threshold_low < special_max < spec_threshold_high → 强制 CHILD (state=1)
+        覆盖主检测区的 EMPTY, 但不会把 EMPTY 冲成 CHILD 后再被 ADULT 覆盖
+        (ADULT 在主检测区已判出时优先级更高)
     """
 
     def __init__(self, params):
@@ -3090,7 +3153,7 @@ class RAOccupancyDetector:
         win_size = params.get('smooth_window', 3)
         self.state_window = {s['name']: deque(maxlen=win_size) for s in self.seats}
         self.occupancy = {s['name']: 0 for s in self.seats}
-        self.energy_values = {s['name']: {'adult': 0.0, 'child': 0.0} for s in self.seats}
+        self.energy_values = {s['name']: {'main': 0.0, 'child_special': 0.0} for s in self.seats}
         self.hold_until = {s['name']: 0.0 for s in self.seats}
         self._last_state = {s['name']: 0 for s in self.seats}
 
@@ -3101,7 +3164,7 @@ class RAOccupancyDetector:
 
     def process(self, energy_dict):
         """
-        energy_dict: {'1': {'adult': 0.052, 'child': 0.030}, ...}
+        energy_dict: {'1': {'main': 0.052, 'child_special': 0.030}, ...}
         返回: (occupancy_dict, energy_dict, state_dict)
               state: 0=empty, 1=child, 2=adult
         """
@@ -3109,36 +3172,45 @@ class RAOccupancyDetector:
             name = s['name']
             e = energy_dict.get(name, {})
             if isinstance(e, dict):
-                self.energy_values[name] = {'adult': e.get('adult', 0.0),
-                                            'child': e.get('child', 0.0)}
+                self.energy_values[name] = {'main': e.get('main', 0.0),
+                                            'child_special': e.get('child_special', 0.0)}
             else:
-                self.energy_values[name] = {'adult': float(e), 'child': 0.0}
+                self.energy_values[name] = {'main': float(e), 'child_special': 0.0}
 
-        # 仅用成人能量做相对比较
-        max_adult = max(self.energy_values[n]['adult'] for n in self.energy_values) \
-                    if self.energy_values else 0.0
+        # 全局主检测区最大值 (用于 ra_peak_ratio 相对比较)
+        max_main = max(self.energy_values[n]['main'] for n in self.energy_values) \
+                   if self.energy_values else 0.0
 
         for seat in self.seats:
             name = seat['name']
-            adult_e = self.energy_values[name]['adult']
-            child_e = self.energy_values[name]['child']
+            main_e = self.energy_values[name]['main']
+            special_e = self.energy_values[name]['child_special']
             ratio = seat.get('ra_peak_ratio', 0.3)
 
+            # ── 主检测区判决 ──
             # 成人: threshold + ra_peak_ratio 双条件
-            adult_cfg = seat.get('adult', seat)
-            adult_th = adult_cfg.get('threshold', 0.02)
-
-            if adult_e > adult_th and (max_adult == 0 or adult_e >= ratio * max_adult):
+            adult_th = seat.get('adult_threshold', 0.02)
+            if main_e > adult_th and (max_main == 0 or main_e >= ratio * max_main):
                 self.state_window[name].append(2)  # ADULT
             else:
-                # 小孩: 区间判断 threshold_low < energy < threshold_high (无 ra_peak_ratio)
-                child_cfg = seat.get('child', seat)
-                child_lo = child_cfg.get('threshold_low', child_cfg.get('threshold', 0.05))
-                child_hi = child_cfg.get('threshold_high', 5.0)
-                if child_lo < child_e < child_hi:
+                # 娃娃: 区间判断 (无 ratio 条件)
+                child_lo = seat.get('child_threshold_low', 0.05)
+                child_hi = seat.get('child_threshold_high', 5.0)
+                if child_lo < main_e < child_hi:
                     self.state_window[name].append(1)  # CHILD
                 else:
-                    self.state_window[name].append(0)  # EMPTY
+                    self.state_window[name].append(0)  # EMPTY (暂定)
+
+            # ── 特判区: 角坑兜底 ──
+            # 仅当主检测区未检出成人时, 特判区才能覆盖为 CHILD
+            special_cfg = seat.get('child_special', {})
+            if special_cfg:
+                spec_lo = special_cfg.get('threshold_low', 0.05)
+                spec_hi = special_cfg.get('threshold_high', 5.0)
+                if spec_lo < special_e < spec_hi:
+                    # 只覆盖 0 (EMPTY) 或 1 (CHILD), 不覆盖已经判出的 ADULT
+                    if self.state_window[name][-1] != 2:
+                        self.state_window[name][-1] = 1  # 强制 CHILD
 
         self._smooth()
 
@@ -3183,8 +3255,9 @@ class RAOccupancyDetector:
                 self.occupancy[name] = 1
 
     def get_seat_ellipses(self):
-        return [{'center': (s.get('adult', s)['cx'], s.get('adult', s)['cy']),
-                 'rx': s.get('adult', s)['rx'], 'ry': s.get('adult', s)['ry'],
+        """供 PlotPanel 绘图, 使用主检测区 (main) 椭圆"""
+        return [{'center': (s.get('main', s)['cx'], s.get('main', s)['cy']),
+                 'rx': s.get('main', s)['rx'], 'ry': s.get('main', s)['ry'],
                  'name': s['name']} for s in self.seats]
 
 
@@ -3194,17 +3267,35 @@ class RAOccupancyDetector:
 class LiveRadarSource:
     def __init__(self, config: RadarConfig):
         self.config = config; self.running = False; self.thread = None
-        self.data_queue = queue.Queue(maxsize=5000); self.udp_server = None
+        self.data_queue = queue.Queue(maxsize=5000); self.udp_server = None; self.can_server = None
         self.is_recording = False; self.record_file = None; self.record_lock = threading.Lock()
         self.rec_start_time = 0; self.rec_duration_target = 0; self.measured_fps = 0.0; self.last_fps_time = time.time(); self.frame_count_sec = 0
     def start(self):
         self.running = True; RadarProtocol.update_protocol(self.config.ft_len)
-        if self.config.connection_mode == 'UDP': self.udp_server = UDPFrameServer(ConfigAdapter(self.config)); self.udp_server.start()
+        if self.config.connection_mode == 'UDP':
+            self.udp_server = UDPFrameServer(ConfigAdapter(self.config)); self.udp_server.start()
+        elif self.config.connection_mode == 'CAN':
+
+            ret = init_device(self.config.can_device_type)
+
+
+            if "失败" in str(ret):
+                print(f"[LiveRadarSource] CAN 设备初始化失败: {ret}")
+                self.running = False; return False
+            print(f"[LiveRadarSource] {ret}")
+            radar_hardware_init()
+            self.can_server = CANFrameServer(ConfigAdapter(self.config))
+            self.can_server.start()
+            print("[LiveRadarSource] CAN 接收模式已启动")
         self.thread = threading.Thread(target=self._io_loop, daemon=True); self.thread.start(); return True
     def stop(self):
         self.running = False; self.stop_recording()
         if self.thread: self.thread.join()
         if self.udp_server: self.udp_server.stop()
+        if self.can_server:
+            self.can_server.stop()
+            from device_management import deinit_device
+            deinit_device(self.config.can_device_type)
     def start_recording(self, filename, duration=0):
         with self.record_lock:
             try: os.makedirs(os.path.dirname(filename), exist_ok=True); self.record_file = open(filename, 'wb'); self.is_recording = True; self.rec_start_time = time.time(); self.rec_duration_target = duration; meta = asdict(self.config); meta['recorded_date'] = str(datetime.now()); json.dump(meta, open(filename + ".meta", 'w'), indent=4); return True
@@ -3227,6 +3318,7 @@ class LiveRadarSource:
             raw_chunk = b''
             try:
                 if self.config.connection_mode == 'UDP': f = self.udp_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
+                elif self.config.connection_mode == 'CAN': f = self.can_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
                 elif self.config.connection_mode == 'SERIAL': raw_chunk = ser.read(ser.in_waiting) if ser.in_waiting else b''; time.sleep(0.002) if not raw_chunk else None
             except: pass
             if not raw_chunk: continue
@@ -3759,21 +3851,21 @@ class PlotPanel(tk.Frame):
             # 标题: 能量和 + 占位状态
             occ_parts = []
             energy_parts = []
-            max_adult_e = 0.0
+            max_main_e = 0.0
             for seat_name in sorted(energy.keys(), key=lambda n: int(n)) if energy else []:
                 occ_parts.append(f"{seat_name}={occupancy.get(seat_name, 0)}")
                 e = energy.get(seat_name, {})
                 if isinstance(e, dict):
-                    a_e = e.get('adult', 0.0)
-                    c_e = e.get('child', 0.0)
-                    energy_parts.append(f"{seat_name} A={a_e:.4f} C={c_e:.4f}")
-                    max_adult_e = max(max_adult_e, a_e)
+                    m_e = e.get('main', 0.0)
+                    s_e = e.get('child_special', 0.0)
+                    energy_parts.append(f"{seat_name} M={m_e:.4f} S={s_e:.4f}")
+                    max_main_e = max(max_main_e, m_e)
                 else:
                     energy_parts.append(f"{seat_name}={e:.4f}")
-                    max_adult_e = max(max_adult_e, e)
+                    max_main_e = max(max_main_e, e)
             self.axes['main'].set_title(
                 f"RA Occupancy (Cartesian)\n"
-                f"max adultE={max_adult_e:.4f} | "
+                f"max mainE={max_main_e:.4f} | "
                 f"Occ: [{'|'.join(occ_parts)}]\n"
                 f"E: [{'|'.join(energy_parts)}]")
 
@@ -3786,9 +3878,9 @@ class PlotPanel(tk.Frame):
                 s_val = state.get(name, 0)
                 e = energy.get(name, {})
                 if isinstance(e, dict):
-                    a_e = e.get('adult', 0.0)
-                    c_e = e.get('child', 0.0)
-                    e_display = f"A={a_e:.4f}"
+                    m_e = e.get('main', 0.0)
+                    s_e = e.get('child_special', 0.0)
+                    e_display = f"M={m_e:.4f}\nS={s_e:.4f}"
                 else:
                     e_display = f"E={e:.4f}"
                 color = state_colors.get(s_val, 'green')
@@ -3915,7 +4007,7 @@ class PlotPanel(tk.Frame):
     def _draw_seating_ellipses(self, ax, params):
         """
         根据 SEAT-OCCUPANCY 配置绘制座椅椭圆, 支持动态着色.
-        成人: 实线, 粗线, 标号;  小孩: 虚线, 细线, 标号+c.
+        主检测区: 实线, 粗线, 标号;  特判区: 虚线, 细线, 标号+s.
         若配置不存在则回退到论文 Table II 硬编码值.
         """
         occ_cfg = params.get('occupancy_config', None)
@@ -3931,32 +4023,32 @@ class PlotPanel(tk.Frame):
 
             for sd in seat_defs:
                 name = sd['name']
-                # --- 成人椭圆: 实线 ---
-                adult = sd.get('adult', sd)
+                # --- 主检测区椭圆 (main): 实线 ---
+                main = sd.get('main', sd)
                 a_ellipse = patches.Ellipse(
-                    (adult['cx'], adult['cy']),
-                    width=adult['rx'] * 2, height=adult['ry'] * 2,
+                    (main['cx'], main['cy']),
+                    width=main['rx'] * 2, height=main['ry'] * 2,
                     edgecolor='green', facecolor='none',
                     linestyle='-', linewidth=2.5, alpha=0.8
                 )
                 ax.add_patch(a_ellipse)
                 self._seat_adult_patches[name] = a_ellipse
 
-                # --- 小孩椭圆: 虚线 (仅在有 child 子配置时) ---
-                child = sd.get('child', None)
-                if child is not None:
+                # --- 特判区椭圆 (child_special): 虚线 (仅在有 child_special 子配置时) ---
+                child_special = sd.get('child_special', None)
+                if child_special is not None:
                     self._has_child_ellipses = True
                     c_ellipse = patches.Ellipse(
-                        (child['cx'], child['cy']),
-                        width=child['rx'] * 2, height=child['ry'] * 2,
+                        (child_special['cx'], child_special['cy']),
+                        width=child_special['rx'] * 2, height=child_special['ry'] * 2,
                         edgecolor='green', facecolor='none',
                         linestyle='--', linewidth=1.5, alpha=0.6
                     )
                     ax.add_patch(c_ellipse)
                     self._seat_child_patches[name] = c_ellipse
 
-                # 成人椭圆中心标号
-                txt = ax.text(adult['cx'], adult['cy'], name,
+                # 主检测区椭圆中心标号
+                txt = ax.text(main['cx'], main['cy'], name,
                               color='green', ha='center', fontweight='bold', fontsize=9)
                 self._seat_texts[name] = txt
         else:
@@ -4081,7 +4173,7 @@ class SeatConfigDialog(tk.Toplevel):
         tk.Spinbox(top, textvariable=self.var_hold, from_=0.0, to=30.0, increment=0.5, width=5).grid(row=0, column=8)
 
         # 座椅参数卡片 (4 或 5 个)
-        seat_frame = tk.LabelFrame(self, text="座椅参数 (A=成人 C=小孩: cx/cy=坐标, rx/ry=半轴, th=能量阈值)", padx=10, pady=5)
+        seat_frame = tk.LabelFrame(self, text="座椅参数 (M=主检测区 S=特判区: cx/cy=坐标, rx/ry=半轴, A/C-阈=成人/娃娃阈值)", padx=10, pady=5)
         seat_frame.pack(fill='both', expand=True, padx=10, pady=5)
 
         # 画布+滚动条 (水平+垂直)
@@ -4098,11 +4190,12 @@ class SeatConfigDialog(tk.Toplevel):
         seat_frame.rowconfigure(0, weight=1)
         seat_frame.columnconfigure(0, weight=1)
 
-        # 表头: 14列
-        headers = ['座椅', '名称', 'RA峰值比\nratio',
-                   'A-cx', 'A-cy', 'A-rx', 'A-ry', 'A-阈值',
-                   'C-cx', 'C-cy', 'C-rx', 'C-ry', 'C-阈值下', 'C-阈值上']
-        col_widths = [5, 4, 7] + [5]*11
+        # 表头: 14列 (M=主检测区, A=成人阈值, C=娃娃阈值, S=特判区角坑)
+        headers = ['座椅', '名称', 'ratio',
+                   'M-cx', 'M-cy', 'M-rx', 'M-ry', 'A-阈',
+                   'C-阈下', 'C-阈上',
+                   'S-ccx', 'S-ccy', 'S-crx', 'S-cry']
+        col_widths = [5, 4, 5] + [4]*11
         for j, (h, w) in enumerate(zip(headers, col_widths)):
             tk.Label(self.seat_inner, text=h, font=('Arial', 7, 'bold'),
                      width=w, anchor='center', relief='ridge', bg='#e0e0e0').grid(row=0, column=j, padx=1, pady=1)
@@ -4118,45 +4211,57 @@ class SeatConfigDialog(tk.Toplevel):
             v_ra_ratio = tk.StringVar(value='0.3')
             tk.Spinbox(self.seat_inner, textvariable=v_ra_ratio, from_=0.0, to=1.0, increment=0.05, width=5).grid(row=i+1, column=2, padx=1)
 
-            # Adult 参数
-            v_a_cx = tk.StringVar(value='0.0')
-            tk.Spinbox(self.seat_inner, textvariable=v_a_cx, from_=-3.0, to=3.0, increment=0.05, width=5).grid(row=i+1, column=3, padx=1)
+            # Main 主检测区参数 (cx, cy, rx, ry)
+            v_m_cx = tk.StringVar(value='0.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_m_cx, from_=-3.0, to=3.0, increment=0.05, width=5).grid(row=i+1, column=3, padx=1)
 
-            v_a_cy = tk.StringVar(value='0.0')
-            tk.Spinbox(self.seat_inner, textvariable=v_a_cy, from_=-3.0, to=0.0, increment=0.05, width=5).grid(row=i+1, column=4, padx=1)
+            v_m_cy = tk.StringVar(value='0.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_m_cy, from_=-3.0, to=0.0, increment=0.05, width=5).grid(row=i+1, column=4, padx=1)
 
-            v_a_rx = tk.StringVar(value='0.2')
-            tk.Spinbox(self.seat_inner, textvariable=v_a_rx, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=5, padx=1)
+            v_m_rx = tk.StringVar(value='0.2')
+            tk.Spinbox(self.seat_inner, textvariable=v_m_rx, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=5, padx=1)
 
-            v_a_ry = tk.StringVar(value='0.2')
-            tk.Spinbox(self.seat_inner, textvariable=v_a_ry, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=6, padx=1)
+            v_m_ry = tk.StringVar(value='0.2')
+            tk.Spinbox(self.seat_inner, textvariable=v_m_ry, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=6, padx=1)
 
+            # Adult 阈值
             v_a_th = tk.StringVar(value='0.02')
             tk.Spinbox(self.seat_inner, textvariable=v_a_th, from_=0.0, to=1.0, increment=0.001, width=5).grid(row=i+1, column=7, padx=1)
 
-            # Child 参数
-            v_c_cx = tk.StringVar(value='0.0')
-            tk.Spinbox(self.seat_inner, textvariable=v_c_cx, from_=-3.0, to=3.0, increment=0.05, width=5).grid(row=i+1, column=8, padx=1)
-
-            v_c_cy = tk.StringVar(value='0.0')
-            tk.Spinbox(self.seat_inner, textvariable=v_c_cy, from_=-3.0, to=0.0, increment=0.05, width=5).grid(row=i+1, column=9, padx=1)
-
-            v_c_rx = tk.StringVar(value='0.15')
-            tk.Spinbox(self.seat_inner, textvariable=v_c_rx, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=10, padx=1)
-
-            v_c_ry = tk.StringVar(value='0.15')
-            tk.Spinbox(self.seat_inner, textvariable=v_c_ry, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=11, padx=1)
-
+            # Child 阈值 (基于主检测区)
             v_c_th_lo = tk.StringVar(value='0.05')
-            tk.Spinbox(self.seat_inner, textvariable=v_c_th_lo, from_=0.0, to=100.0, increment=0.01, width=5).grid(row=i+1, column=12, padx=1)
+            tk.Spinbox(self.seat_inner, textvariable=v_c_th_lo, from_=0.0, to=100.0, increment=0.01, width=5).grid(row=i+1, column=8, padx=1)
 
             v_c_th_hi = tk.StringVar(value='5.0')
-            tk.Spinbox(self.seat_inner, textvariable=v_c_th_hi, from_=0.0, to=100.0, increment=0.1, width=5).grid(row=i+1, column=13, padx=1)
+            tk.Spinbox(self.seat_inner, textvariable=v_c_th_hi, from_=0.0, to=100.0, increment=0.1, width=5).grid(row=i+1, column=9, padx=1)
+
+            # Child Special 特判区参数 (角坑兜底: cx, cy, rx, ry)
+            v_s_cx = tk.StringVar(value='0.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_s_cx, from_=-3.0, to=3.0, increment=0.05, width=5).grid(row=i+1, column=10, padx=1)
+
+            v_s_cy = tk.StringVar(value='0.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_s_cy, from_=-3.0, to=0.0, increment=0.05, width=5).grid(row=i+1, column=11, padx=1)
+
+            v_s_rx = tk.StringVar(value='0.15')
+            tk.Spinbox(self.seat_inner, textvariable=v_s_rx, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=12, padx=1)
+
+            v_s_ry = tk.StringVar(value='0.15')
+            tk.Spinbox(self.seat_inner, textvariable=v_s_ry, from_=0.05, to=1.0, increment=0.01, width=5).grid(row=i+1, column=13, padx=1)
+
+            # Child Special 阈值 (特判区专用)
+            v_s_th_lo = tk.StringVar(value='0.05')
+            tk.Spinbox(self.seat_inner, textvariable=v_s_th_lo, from_=0.0, to=100.0, increment=0.01, width=5).grid(row=i+1, column=14, padx=1)
+
+            v_s_th_hi = tk.StringVar(value='5.0')
+            tk.Spinbox(self.seat_inner, textvariable=v_s_th_hi, from_=0.0, to=100.0, increment=0.1, width=5).grid(row=i+1, column=15, padx=1)
 
             self.seat_vars.append({
                 'name': v_name, 'ra_peak_ratio': v_ra_ratio,
-                'adult': {'cx': v_a_cx, 'cy': v_a_cy, 'rx': v_a_rx, 'ry': v_a_ry, 'threshold': v_a_th},
-                'child': {'cx': v_c_cx, 'cy': v_c_cy, 'rx': v_c_rx, 'ry': v_c_ry, 'threshold_low': v_c_th_lo, 'threshold_high': v_c_th_hi},
+                'main': {'cx': v_m_cx, 'cy': v_m_cy, 'rx': v_m_rx, 'ry': v_m_ry},
+                'adult_threshold': v_a_th,
+                'child_threshold_low': v_c_th_lo, 'child_threshold_high': v_c_th_hi,
+                'child_special': {'cx': v_s_cx, 'cy': v_s_cy, 'rx': v_s_rx, 'ry': v_s_ry,
+                                  'threshold_low': v_s_th_lo, 'threshold_high': v_s_th_hi},
             })
 
         # 底部按钮
@@ -4185,19 +4290,24 @@ class SeatConfigDialog(tk.Toplevel):
                 s = seats[i]
                 sv['name'].set(s.get('name', str(i+1)))
                 sv['ra_peak_ratio'].set(str(s.get('ra_peak_ratio', 0.3)))
-                adult = s.get('adult', s)  # fallback 兼容旧配置
-                sv['adult']['cx'].set(str(adult.get('cx', 0.0)))
-                sv['adult']['cy'].set(str(adult.get('cy', 0.0)))
-                sv['adult']['rx'].set(str(adult.get('rx', 0.2)))
-                sv['adult']['ry'].set(str(adult.get('ry', 0.2)))
-                sv['adult']['threshold'].set(str(adult.get('threshold', 0.02)))
-                child = s.get('child', s)
-                sv['child']['cx'].set(str(child.get('cx', 0.0)))
-                sv['child']['cy'].set(str(child.get('cy', 0.0)))
-                sv['child']['rx'].set(str(child.get('rx', 0.15)))
-                sv['child']['ry'].set(str(child.get('ry', 0.15)))
-                sv['child']['threshold_low'].set(str(child.get('threshold_low', 0.05)))
-                sv['child']['threshold_high'].set(str(child.get('threshold_high', 5.0)))
+                # main 区域
+                main = s.get('main', s)
+                sv['main']['cx'].set(str(main.get('cx', 0.0)))
+                sv['main']['cy'].set(str(main.get('cy', 0.0)))
+                sv['main']['rx'].set(str(main.get('rx', 0.2)))
+                sv['main']['ry'].set(str(main.get('ry', 0.2)))
+                # 阈值
+                sv['adult_threshold'].set(str(s.get('adult_threshold', 0.02)))
+                sv['child_threshold_low'].set(str(s.get('child_threshold_low', 0.05)))
+                sv['child_threshold_high'].set(str(s.get('child_threshold_high', 5.0)))
+                # child_special 特判区
+                spec = s.get('child_special', s)
+                sv['child_special']['cx'].set(str(spec.get('cx', 0.0)))
+                sv['child_special']['cy'].set(str(spec.get('cy', 0.0)))
+                sv['child_special']['rx'].set(str(spec.get('rx', 0.15)))
+                sv['child_special']['ry'].set(str(spec.get('ry', 0.15)))
+                sv['child_special']['threshold_low'].set(str(spec.get('threshold_low', 0.05)))
+                sv['child_special']['threshold_high'].set(str(spec.get('threshold_high', 5.0)))
 
     def _save(self):
         """从 UI 控件写回 occ_params 字典, 执行回调"""
@@ -4220,20 +4330,22 @@ class SeatConfigDialog(tk.Toplevel):
                 seat_list.append({
                     'name': sv['name'].get(),
                     'ra_peak_ratio': float(sv['ra_peak_ratio'].get()),
-                    'adult': {
-                        'cx': float(sv['adult']['cx'].get()),
-                        'cy': float(sv['adult']['cy'].get()),
-                        'rx': float(sv['adult']['rx'].get()),
-                        'ry': float(sv['adult']['ry'].get()),
-                        'threshold': float(sv['adult']['threshold'].get()),
+                    'main': {
+                        'cx': float(sv['main']['cx'].get()),
+                        'cy': float(sv['main']['cy'].get()),
+                        'rx': float(sv['main']['rx'].get()),
+                        'ry': float(sv['main']['ry'].get()),
                     },
-                    'child': {
-                        'cx': float(sv['child']['cx'].get()),
-                        'cy': float(sv['child']['cy'].get()),
-                        'rx': float(sv['child']['rx'].get()),
-                        'ry': float(sv['child']['ry'].get()),
-                        'threshold_low': float(sv['child']['threshold_low'].get()),
-                        'threshold_high': float(sv['child']['threshold_high'].get()),
+                    'adult_threshold': float(sv['adult_threshold'].get()),
+                    'child_threshold_low': float(sv['child_threshold_low'].get()),
+                    'child_threshold_high': float(sv['child_threshold_high'].get()),
+                    'child_special': {
+                        'cx': float(sv['child_special']['cx'].get()),
+                        'cy': float(sv['child_special']['cy'].get()),
+                        'rx': float(sv['child_special']['rx'].get()),
+                        'ry': float(sv['child_special']['ry'].get()),
+                        'threshold_low': float(sv['child_special']['threshold_low'].get()),
+                        'threshold_high': float(sv['child_special']['threshold_high'].get()),
                     },
                 })
             except ValueError:
@@ -4258,7 +4370,7 @@ class ControlPanel(tk.Frame):
         frm_mode = tk.Frame(self, bg='#f0f0f0')
         frm_mode.pack(fill='x', padx=5, pady=5)
         self.mode_var = tk.StringVar(value=config.connection_mode)
-        ttk.Combobox(frm_mode, textvariable=self.mode_var, values=('UDP', 'SERIAL', 'PLAYBACK'), state='readonly').pack(fill='x')
+        ttk.Combobox(frm_mode, textvariable=self.mode_var, values=('UDP', 'SERIAL', 'CAN', 'PLAYBACK'), state='readonly').pack(fill='x')
         self.mode_var.trace_add('write', self._on_mode_change)
 
         # --- 基础配置区域 (折叠或简化显示) ---
@@ -4271,6 +4383,16 @@ class ControlPanel(tk.Frame):
             frm.pack(fill='x', padx=5, pady=2)
             for attr in attrs:
                 self._entry(frm, attr.replace('_', ' ').title() + ":", attr)
+
+        # --- CAN 配置面板 (仅 CAN 模式显示) ---
+        self.frm_can = tk.LabelFrame(self, text="CAN Settings", bg='#f0f0f0', fg='#c60')
+        self._entry(self.frm_can, "CAN Device:", "can_device_type")
+        self._entry(self.frm_can, "MCU Name:", "mcu_name")
+        self._entry(self.frm_can, "Packet Size:", "can_packet_size")
+        self._entry(self.frm_can, "Header Size:", "can_header_size")
+        self._entry(self.frm_can, "CIR Data Size:", "can_cir_data_size")
+        self._entry(self.frm_can, "UCI Signature:", "can_uci_signature")
+        self._entry(self.frm_can, "Packet Count:", "can_packet_cnt")
 
         # --- 算法设置 ---
         frm_algo = tk.LabelFrame(self, text="Algo & Geometry", bg='#f0f0f0', fg='purple')
@@ -4537,16 +4659,22 @@ class ControlPanel(tk.Frame):
     def _on_mode_change(self, *_):
         self.config.connection_mode = self.mode_var.get()
         is_pb = (self.config.connection_mode == 'PLAYBACK')
-        
+        is_can = (self.config.connection_mode == 'CAN')
+
         if is_pb:
             self.btn_rec.config(state='disabled')
             self.frm_pb.pack(fill='x', padx=5, pady=5)
-            # 切换到回放模式时重置进度条
             self.pb_bar['value'] = 0
             self.lbl_prog_text.config(text="Progress: 0.0%")
         else:
             self.btn_rec.config(state='normal')
             self.frm_pb.pack_forget()
+
+        # CAN 配置面板显隐
+        if is_can:
+            self.frm_can.pack(fill='x', padx=5, pady=2)
+        else:
+            self.frm_can.pack_forget()
 
     def _on_layout_change(self, e): 
         self.config.load_layout(self.cb_layout.get())
