@@ -12,6 +12,7 @@ import threading
 import queue
 import serial
 import os
+import subprocess
 import struct
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
@@ -142,14 +143,14 @@ DEFAULT_ALGO_PARAMS = {
         "forward_backward": False,# 前后向平滑 (解相干)
         "diag_load": 1e-5,        # 对角加载因子
         "fov_degrees": 180.0,     # 视场角
-        
+
         # --- 绘图与检测参数 ---
         "music_threshold": 0.15,  # 伪谱显示阈值
         "music_vmax": 0.6,        # <--- 新增：手动设置伪谱显示上限 (对比度)
         "virt_tx_idx": [0, 1],    # 虚拟阵列 TX 索引
         "virt_rx_idx": [2, 3],    # 虚拟阵列 RX 索引
         "fusion_mode": "cartesian", # 'polar' 或 'cartesian'
-        
+
         # --- 多普勒与呼吸参数 ---
         "doppler_tx": 1,
         "doppler_rx": 6,
@@ -159,7 +160,7 @@ DEFAULT_ALGO_PARAMS = {
         "smooth_win": 10,
         "breath_val_th": 0.25,
         "breath_cnt_th": 5,
-        
+
         # --- 绘图范围 (米) ---
         "plot_xlim": 2.0,
         "plot_ylim_min": -4.0,
@@ -4397,7 +4398,7 @@ class ControlPanel(tk.Frame):
         # --- 算法设置 ---
         frm_algo = tk.LabelFrame(self, text="Algo & Geometry", bg='#f0f0f0', fg='purple')
         frm_algo.pack(fill='x', padx=5, pady=5)
-        
+
         row1 = tk.Frame(frm_algo, bg='#f0f0f0')
         row1.pack(fill='x', padx=2)
         tk.Label(row1, text="Algo:", bg='#f0f0f0').pack(side='left')
@@ -4407,7 +4408,7 @@ class ControlPanel(tk.Frame):
         self.cb_algo.bind("<<ComboboxSelected>>", self._on_algo_change)
         tk.Button(row1, text="⚙️ Params", command=self._open_algo).pack(side='right')
         tk.Button(row1, text="🪑 Seats", command=self._open_seats).pack(side='right', padx=(2, 5))
-        
+
         row2 = tk.Frame(frm_algo, bg='#f0f0f0')
         row2.pack(fill='x', padx=2)
         tk.Label(row2, text="Layout:", bg='#f0f0f0').pack(side='left')
@@ -4422,13 +4423,25 @@ class ControlPanel(tk.Frame):
 
         # 1. 占用状态勾选
         self._updating_filename = False
+        self._record_speech_jobs = []
+        self.var_io_mode = tk.StringVar(value="in")
         self.var_person_id = tk.StringVar(value="a1")
         self.var_record_area = tk.StringVar(value="d")
         self.var_record_pos = tk.StringVar(value="1")
         self.var_record_pose = tk.StringVar(value="s1")
+        self.var_out_actions = tk.StringVar(value="")
+        self.var_out_pos_count = tk.StringVar(value="1")
+        self.var_out_action_time = tk.StringVar(value="10")
+
+        row_io = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_io.pack(fill='x', padx=2, pady=(5, 2))
+        tk.Label(row_io, text="采样类型:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
+        for text, value in (("in", "in"), ("out", "out")):
+            tk.Radiobutton(row_io, text=text, value=value, variable=self.var_io_mode,
+                           bg='#f0f0f0', command=self._on_io_mode_change).pack(side='left', padx=3)
 
         row_person = tk.Frame(frm_rec, bg='#f0f0f0')
-        row_person.pack(fill='x', padx=2, pady=(5, 2))
+        row_person.pack(fill='x', padx=2, pady=2)
         tk.Label(row_person, text="人员编号:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
         tk.Entry(row_person, textvariable=self.var_person_id).pack(side='left', fill='x', expand=True)
 
@@ -4460,10 +4473,36 @@ class ControlPanel(tk.Frame):
             tk.Radiobutton(row_pose_lie, text=text, value=value, variable=self.var_record_pose,
                            bg='#f0f0f0', command=self._refresh_filename_preview).pack(side='left', padx=3)
 
+        row_out_actions = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_out_actions.pack(fill='x', padx=2, pady=2)
+        tk.Label(row_out_actions, text="动作:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
+        tk.Entry(row_out_actions, textvariable=self.var_out_actions).pack(side='left', fill='x', expand=True)
+
+        row_out_pos = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_out_pos.pack(fill='x', padx=2, pady=2)
+        tk.Label(row_out_pos, text="位置数量:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
+        tk.Entry(row_out_pos, textvariable=self.var_out_pos_count, width=8).pack(side='left')
+
+        row_out_time = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_out_time.pack(fill='x', padx=2, pady=2)
+        tk.Label(row_out_time, text="单动作时间:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
+        tk.Entry(row_out_time, textvariable=self.var_out_action_time, width=8).pack(side='left')
+        tk.Label(row_out_time, text="秒", bg='#f0f0f0', fg='gray').pack(side='left', padx=4)
+        self.lbl_out_total_duration = tk.Label(row_out_time, text="", bg='#f0f0f0', fg='gray')
+        self.lbl_out_total_duration.pack(side='left', padx=4)
+
         self.var_person_id.trace_add("write", lambda *args: self._refresh_filename_preview())
+        self.var_out_actions.trace_add("write", lambda *args: self._on_out_record_config_change())
+        self.var_out_pos_count.trace_add("write", lambda *args: self._on_out_record_config_change())
+        self.var_out_action_time.trace_add("write", lambda *args: self._on_out_record_config_change())
+        self._in_record_rows = [row_area, row_pos, row_pose_sit, row_pose_lie]
+        self._out_record_rows = [row_out_actions, row_out_pos, row_out_time]
+        for row in self._out_record_rows:
+            row.pack_forget()
 
         # 2. 保存目录下拉 + 浏览
         row_dir = tk.Frame(frm_rec, bg='#f0f0f0')
+        self.row_save_dir = row_dir
         row_dir.pack(fill='x', padx=2, pady=2)
         tk.Label(row_dir, text="保存目录:", bg='#f0f0f0', anchor='w').pack(side='left')
         # 确保默认目录在列表里
@@ -4492,8 +4531,10 @@ class ControlPanel(tk.Frame):
 
         # 4. 时长设置
         row_dur = tk.Frame(frm_rec, bg='#f0f0f0')
+        self.row_rec_duration = row_dur
         row_dur.pack(fill='x', padx=2, pady=2)
-        tk.Label(row_dur, text="录制时长:", bg='#f0f0f0', anchor='w').pack(side='left')
+        self.lbl_rec_duration = tk.Label(row_dur, text="录制时长:", bg='#f0f0f0', anchor='w')
+        self.lbl_rec_duration.pack(side='left')
         self.var_rec_dur = tk.DoubleVar(value=config.record_duration)
         tk.Entry(row_dur, textvariable=self.var_rec_dur, width=6).pack(side='left', padx=4)
         tk.Label(row_dur, text="秒 (0=不限)", bg='#f0f0f0', fg='gray').pack(side='left')
@@ -4501,6 +4542,7 @@ class ControlPanel(tk.Frame):
         # 5. 录制按钮
         self.btn_rec = tk.Button(frm_rec, text="Start Recording", command=self._rec, bg='#ddd')
         self.btn_rec.pack(fill='x', padx=5, pady=5)
+        self._on_io_mode_change()
 
         # --- 回放控制 ---
         self.frm_pb = tk.Frame(self, bg='#f0f0f0')
@@ -4572,6 +4614,58 @@ class ControlPanel(tk.Frame):
         except:
             pass
 
+    def _pack_record_rows(self, rows, visible):
+        for row in rows:
+            if visible:
+                row.pack(fill='x', padx=2, pady=2, before=self.row_save_dir)
+            else:
+                row.pack_forget()
+
+    def _on_io_mode_change(self):
+        is_out = (self.var_io_mode.get() == 'out')
+        self._pack_record_rows(self._in_record_rows, not is_out)
+        self._pack_record_rows(self._out_record_rows, is_out)
+        if is_out:
+            self.row_rec_duration.pack_forget()
+            self._update_out_total_duration()
+        else:
+            self.row_rec_duration.pack(fill='x', padx=2, pady=2, before=self.btn_rec)
+        self._refresh_filename_preview()
+
+    def _parse_out_actions(self):
+        raw = self.var_out_actions.get().replace('，', ',')
+        return [item.strip() for item in raw.split(',') if item.strip()]
+
+    def _get_out_position_count(self):
+        count = int(self.var_out_pos_count.get())
+        if count <= 0:
+            raise ValueError("position count must be positive")
+        return count
+
+    def _get_out_action_time(self):
+        seconds = float(self.var_out_action_time.get())
+        if seconds <= 0:
+            raise ValueError("action time must be positive")
+        return seconds
+
+    def _calc_out_record_duration(self):
+        actions = self._parse_out_actions()
+        if not actions:
+            raise ValueError("actions required")
+        return self._get_out_action_time() * len(actions) * self._get_out_position_count()
+
+    def _update_out_total_duration(self):
+        try:
+            total = self._calc_out_record_duration()
+            self.var_rec_dur.set(total)
+            self.lbl_out_total_duration.config(text=f"总时长: {total:.1f} 秒")
+        except Exception:
+            self.lbl_out_total_duration.config(text="总时长: --")
+
+    def _on_out_record_config_change(self):
+        if self.var_io_mode.get() == 'out':
+            self._update_out_total_duration()
+
     def _entry(self, p, l, a):
         r = tk.Frame(p, bg='#f0f0f0')
         r.pack(fill='x')
@@ -4600,6 +4694,8 @@ class ControlPanel(tk.Frame):
         person_id = ''.join(ch for ch in self.var_person_id.get().strip() if ch.isalnum())
         if not person_id:
             person_id = "a1"
+        if self.var_io_mode.get() == 'out':
+            return f"out_{person_id}.bin"
         area_pos = f"{self.var_record_area.get()}{self.var_record_pos.get()}"
         pose = self.var_record_pose.get()
         return f"in_{person_id}_{area_pos}_{pose}.bin"
@@ -4731,15 +4827,65 @@ class ControlPanel(tk.Frame):
             self._refresh_occ_checkboxes()
         SeatConfigDialog(self, occ_params, on_save)
 
-    def _sel_pb(self): 
+    def _sel_pb(self):
         # 修改为 askopenfilenames (复数)
         files = filedialog.askopenfilenames(filetypes=[("Radar Bin", "*.bin"), ("All", "*.*")])
         if files:
             # 将选中的文件列表存入 config (需确保 config 有这个属性)
-            self.config.playback_file_list = list(files) 
+            self.config.playback_file_list = list(files)
             self.config.playback_file = files[0] # 默认第一个
             count = len(files)
             self.lbl_pb.config(text=f"Selected {count} files") # UI 显示数量
+
+    def _speak_async(self, text):
+        if not text:
+            return
+        escaped = text.replace("'", "''")
+        cmd = (
+            "Add-Type -AssemblyName System.Speech; "
+            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            f"$s.Speak('{escaped}')"
+        )
+        try:
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        except Exception as e:
+            print(f"[Speech] 播报失败: {e}")
+
+    def _schedule_record_speech(self, delay_ms, text):
+        job = self.after(max(0, int(delay_ms)), lambda: self._speak_async(text))
+        self._record_speech_jobs.append(job)
+
+    def _clear_record_speech(self):
+        for job in self._record_speech_jobs:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._record_speech_jobs = []
+
+    def _start_record_speech(self, duration):
+        self._clear_record_speech()
+        self._schedule_record_speech(0, "开始采样")
+        if self.var_io_mode.get() == 'out':
+            actions = self._parse_out_actions()
+            action_time = self._get_out_action_time()
+            pos_count = self._get_out_position_count()
+            for pos_idx in range(pos_count):
+                for action_idx, action in enumerate(actions):
+                    elapsed = (pos_idx * len(actions) + action_idx) * action_time
+                    if pos_idx > 0 and action_idx == 0:
+                        self._schedule_record_speech(elapsed * 1000, "更换位置")
+                        self._schedule_record_speech(elapsed * 1000 + 1000, action)
+                    elif pos_idx == 0 and action_idx == 0:
+                        self._schedule_record_speech(1000, action)
+                    else:
+                        self._schedule_record_speech(elapsed * 1000, action)
+        if duration > 0:
+            self._schedule_record_speech(duration * 1000, "结束采样")
 
     def _rec(self):
         if not self.recording_state:
@@ -4756,7 +4902,11 @@ class ControlPanel(tk.Frame):
 
                 self.config.record_filename = fname
 
-                self.config.record_duration = float(self.var_rec_dur.get())
+                if self.var_io_mode.get() == 'out':
+                    self.config.record_duration = self._calc_out_record_duration()
+                    self.var_rec_dur.set(self.config.record_duration)
+                else:
+                    self.config.record_duration = float(self.var_rec_dur.get())
             except ValueError:
                 messagebox.showerror("Error", "无效的参数输入")
                 return
@@ -4773,9 +4923,12 @@ class ControlPanel(tk.Frame):
             if self.cbs['rec_start'](full_path, self.config.record_duration):
                 self.recording_state = True
                 self.btn_rec.config(bg='#f88', text="Stop Recording")
+                self._start_record_speech(self.config.record_duration)
         else:
             # --- 停止录制 ---
             self.cbs['rec_stop']()
+            self._clear_record_speech()
+            self._speak_async("结束采样")
             self.recording_state = False
             self.btn_rec.config(bg='#ddd', text="Start Recording")
 
