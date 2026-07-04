@@ -4421,36 +4421,46 @@ class ControlPanel(tk.Frame):
         frm_rec.pack(fill='x', padx=5, pady=5)
 
         # 1. 占用状态勾选
-        row_occ_label = tk.Frame(frm_rec, bg='#f0f0f0')
-        row_occ_label.pack(fill='x', padx=2, pady=(5, 0))
-        tk.Label(row_occ_label, text="占用状态:", bg='#f0f0f0', anchor='w').pack(side='left')
+        self._updating_filename = False
+        self.var_person_id = tk.StringVar(value="a1")
+        self.var_record_area = tk.StringVar(value="d")
+        self.var_record_pos = tk.StringVar(value="1")
+        self.var_record_pose = tk.StringVar(value="s1")
 
-        row_occ = tk.Frame(frm_rec, bg='#f0f0f0')
-        row_occ.pack(fill='x', padx=2, pady=2)
-        self._occ_row = row_occ  # 保存引用, 供 _refresh_occ_checkboxes 重建用
+        row_person = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_person.pack(fill='x', padx=2, pady=(5, 2))
+        tk.Label(row_person, text="人员编号:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
+        tk.Entry(row_person, textvariable=self.var_person_id).pack(side='left', fill='x', expand=True)
 
-        self._occ_check_vars = {}
-        occ_cfg = config.algo_params.get('SEAT-OCCUPANCY', {})
-        seat_type = occ_cfg.get('seat_type', '4_seats')
-        num_seats = 4 if seat_type == '4_seats' else 5
-        seat_key = 'seats_4' if seat_type == '4_seats' else 'seats_5'
-        seat_defs = occ_cfg.get(seat_key, occ_cfg.get('seats_4', []))
-        for s in seat_defs[:num_seats]:
-            name = s.get('name', str(len(self._occ_check_vars) + 1))
-            var = tk.BooleanVar(value=False)
-            self._occ_check_vars[name] = var
-            cb = tk.Checkbutton(row_occ, text=f"座椅{name}", variable=var,
-                               bg='#f0f0f0', command=self._on_occ_checkbox_change)
-            cb.pack(side='left', padx=3)
+        row_area = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_area.pack(fill='x', padx=2, pady=2)
+        tk.Label(row_area, text="脚坑/座位:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
+        for text, value in (("脚坑", "d"), ("座位", "o")):
+            tk.Radiobutton(row_area, text=text, value=value, variable=self.var_record_area,
+                           bg='#f0f0f0', command=self._refresh_filename_preview).pack(side='left', padx=3)
 
-        row_occ_btn = tk.Frame(frm_rec, bg='#f0f0f0')
-        row_occ_btn.pack(fill='x', padx=2, pady=(0, 5))
-        tk.Button(row_occ_btn, text="全选", width=4, font=('Arial', 7),
-                  command=self._occ_select_all).pack(side='left', padx=2)
-        tk.Button(row_occ_btn, text="清空", width=4, font=('Arial', 7),
-                  command=self._occ_clear_all).pack(side='left', padx=2)
-        tk.Button(row_occ_btn, text="前排", width=4, font=('Arial', 7),
-                  command=lambda: self._occ_select_front(num_seats)).pack(side='left', padx=2)
+        row_pos = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_pos.pack(fill='x', padx=2, pady=2)
+        tk.Label(row_pos, text="位置编号:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
+        for value in ("1", "2", "3", "4", "5"):
+            tk.Radiobutton(row_pos, text=value, value=value, variable=self.var_record_pos,
+                           bg='#f0f0f0', command=self._refresh_filename_preview).pack(side='left', padx=3)
+
+        row_pose_sit = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_pose_sit.pack(fill='x', padx=2, pady=2)
+        tk.Label(row_pose_sit, text="姿势-坐:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
+        for text, value in (("坐1", "s1"), ("坐2", "s2"), ("坐3", "s3")):
+            tk.Radiobutton(row_pose_sit, text=text, value=value, variable=self.var_record_pose,
+                           bg='#f0f0f0', command=self._refresh_filename_preview).pack(side='left', padx=3)
+
+        row_pose_lie = tk.Frame(frm_rec, bg='#f0f0f0')
+        row_pose_lie.pack(fill='x', padx=2, pady=2)
+        tk.Label(row_pose_lie, text="姿势-躺:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
+        for text, value in (("躺1", "l1"), ("躺2", "l2"), ("躺3", "l3")):
+            tk.Radiobutton(row_pose_lie, text=text, value=value, variable=self.var_record_pose,
+                           bg='#f0f0f0', command=self._refresh_filename_preview).pack(side='left', padx=3)
+
+        self.var_person_id.trace_add("write", lambda *args: self._refresh_filename_preview())
 
         # 2. 保存目录下拉 + 浏览
         row_dir = tk.Frame(frm_rec, bg='#f0f0f0')
@@ -4473,9 +4483,11 @@ class ControlPanel(tk.Frame):
         row_fname = tk.Frame(frm_rec, bg='#f0f0f0')
         row_fname.pack(fill='x', padx=2, pady=2)
         tk.Label(row_fname, text="文件名:", bg='#f0f0f0', anchor='w').pack(side='left')
-        self.lbl_fname_preview = tk.Label(row_fname, text="", bg='#fff', anchor='w',
-                                          font=('Arial', 8), relief='sunken', padx=4)
-        self.lbl_fname_preview.pack(side='left', fill='x', expand=True)
+        self.var_record_filename = tk.StringVar(value="")
+        self.entry_record_filename = tk.Entry(row_fname, textvariable=self.var_record_filename,
+                                              font=('Arial', 8), relief='sunken')
+        self.entry_record_filename.pack(side='left', fill='x', expand=True)
+        self.var_record_filename.trace_add("write", lambda *args: self._on_record_filename_edit())
         self._refresh_filename_preview()
 
         # 4. 时长设置
@@ -4584,11 +4596,22 @@ class ControlPanel(tk.Frame):
 
     # ===== 录制文件名自动生成辅助方法 =====
     def _gen_base_filename(self):
-        """根据座位勾选状态生成基础文件名, 不含序号后缀."""
-        selected = sorted([name for name, var in self._occ_check_vars.items() if var.get()])
-        if not selected:
-            return "occ_empty.bin"
-        return f"occ_{'_'.join(selected)}.bin"
+        """根据采样标签生成基础文件名."""
+        person_id = ''.join(ch for ch in self.var_person_id.get().strip() if ch.isalnum())
+        if not person_id:
+            person_id = "a1"
+        area_pos = f"{self.var_record_area.get()}{self.var_record_pos.get()}"
+        pose = self.var_record_pose.get()
+        return f"in_{person_id}_{area_pos}_{pose}.bin"
+
+    def _normalize_record_filename(self, filename):
+        filename = filename.strip()
+        if not filename:
+            filename = self._gen_base_filename()
+        filename = os.path.basename(filename)
+        if not filename.lower().endswith('.bin'):
+            filename += '.bin'
+        return filename
 
     def _get_unique_filepath(self, directory, base_name):
         """在 directory 下找不冲突的文件名, 必要时加 _2, _3... 后缀.
@@ -4607,17 +4630,27 @@ class ControlPanel(tk.Frame):
             n += 1
 
     def _refresh_filename_preview(self):
-        """更新文件名预览 Label."""
+        """更新文件名输入框."""
         base = self._gen_base_filename()
         directory = self.var_save_dir.get().strip() or self.config.data_save_dir
         full_path, actual_name = self._get_unique_filepath(directory, base)
-        if actual_name == base:
-            self.lbl_fname_preview.config(text=base, fg='black')
-        else:
-            self.lbl_fname_preview.config(
-                text=f"{actual_name} (原名 {base} 已存在)", fg='#cc6600')
-        # 缓存供 _rec 使用
+        self._updating_filename = True
+        self.var_record_filename.set(actual_name)
+        self._updating_filename = False
         self._cached_rec_path = full_path
+
+    def _update_cached_record_path_from_filename(self):
+        filename = self._normalize_record_filename(self.var_record_filename.get())
+        directory = self.var_save_dir.get().strip() or self.config.data_save_dir
+        self._cached_rec_path = os.path.join(directory, filename)
+        self._updating_filename = True
+        self.var_record_filename.set(filename)
+        self._updating_filename = False
+
+    def _on_record_filename_edit(self):
+        if self._updating_filename:
+            return
+        self._update_cached_record_path_from_filename()
 
     def _on_occ_checkbox_change(self):
         self._refresh_filename_preview()
@@ -4631,22 +4664,15 @@ class ControlPanel(tk.Frame):
             self.config.recent_save_dirs = self._recent_dirs
             self.cb_save_dir['values'] = self._recent_dirs
         self.config.data_save_dir = directory
-        self._refresh_filename_preview()
-
+        self._update_cached_record_path_from_filename()
     def _occ_select_all(self):
-        for var in self._occ_check_vars.values():
-            var.set(True)
         self._refresh_filename_preview()
 
     def _occ_clear_all(self):
-        for var in self._occ_check_vars.values():
-            var.set(False)
         self._refresh_filename_preview()
 
     def _occ_select_front(self, num_seats):
         """前排: 前2个座椅选中, 其余清空 (模拟常见的前排有人场景)"""
-        for i, (name, var) in enumerate(self._occ_check_vars.items()):
-            var.set(i < 2)
         self._refresh_filename_preview()
 
     def _choose_dir(self):
@@ -4691,29 +4717,7 @@ class ControlPanel(tk.Frame):
                                       self.cbs['update_layout'](self.config.current_algo)))
 
     def _refresh_occ_checkboxes(self):
-        """销毁并重建座位勾选框, 用于车型切换后即时刷新."""
-        occ_cfg = self.config.algo_params.get('SEAT-OCCUPANCY', {})
-        seat_type = occ_cfg.get('seat_type', '4_seats')
-        seat_key = 'seats_4' if seat_type == '4_seats' else 'seats_5'
-        seat_defs = occ_cfg.get(seat_key, occ_cfg.get('seats_4', []))
-        # 清除旧 checkbox widget
-        for name in list(self._occ_check_vars.keys()):
-            var = self._occ_check_vars.pop(name)
-            # 找到并销毁对应的 Checkbutton
-            for w in self._occ_row.winfo_children():
-                if isinstance(w, tk.Checkbutton):
-                    # 匹配 variable 判断归属
-                    if w.cget('variable') == str(var):
-                        w.destroy()
-                        break
-        # 重建新 checkbox
-        for s in seat_defs:
-            name = s.get('name', str(len(self._occ_check_vars) + 1))
-            var = tk.BooleanVar(value=False)
-            self._occ_check_vars[name] = var
-            cb = tk.Checkbutton(self._occ_row, text=f"座椅{name}", variable=var,
-                               bg='#f0f0f0', command=self._on_occ_checkbox_change)
-            cb.pack(side='left', padx=3)
+        """录制命名已改为固定采样标签, 座椅配置变化时只刷新文件名."""
         self._refresh_filename_preview()
 
     def _open_seats(self):
@@ -4745,8 +4749,8 @@ class ControlPanel(tk.Frame):
                 save_dir = self.var_save_dir.get().strip()
                 self.config.data_save_dir = save_dir
 
-                # 刷新预览以确保 _cached_rec_path 是最新的
-                self._refresh_filename_preview()
+                # 使用当前文件名输入框内容, 避免覆盖手动修改
+                self._update_cached_record_path_from_filename()
                 full_path = self._cached_rec_path
                 fname = os.path.basename(full_path)
 
