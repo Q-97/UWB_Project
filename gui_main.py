@@ -398,6 +398,7 @@ DEFAULT_ALGO_PARAMS = {
         "snapshots": 64,
         "cir_combine_num": 1,
         "leakage_offset": 5,
+        "range_bin_drop_front": 5,
         "doppler_window": "chebyshev",
         "doppler_win_atten": 60,
         "doppler_dc_remove": True,
@@ -2604,7 +2605,12 @@ class AlgorithmProcessor:
             trim = n_comb * cir_comb
             current_cube = current_cube[:, :, :16, :trim] \
                 .reshape(4, 2, 16, n_comb, cir_comb).mean(axis=4)
-        current_cube = np.roll(current_cube, -leakage_offset, axis=2)
+        drop_front = int(params.get('range_bin_drop_front', 0) or 0)
+        if drop_front > 0:
+            drop_front = min(drop_front, max(0, current_cube.shape[2] - 1))
+            current_cube = current_cube[:, :, drop_front:, :]
+        else:
+            current_cube = np.roll(current_cube, -leakage_offset, axis=2)
 
         # 展平 8 通道 → 选 4 通道
         # current_cube: (4 RX, 2 TX, 32 range, L chirps)
