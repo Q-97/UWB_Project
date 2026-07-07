@@ -412,6 +412,7 @@ DEFAULT_ALGO_PARAMS = {
         # ---- 后处理 ----
         "smooth_kernel": [2, 4],        # 卷积平滑核大小 [rows, cols], 可调
         # ---- 可视化 ----
+        "heatmap_update_stride_combined": 8,
         "plot_xlim": 1.5,
         "plot_ylim_min": -2.5,
         "plot_ylim_max": -0.1,
@@ -4975,6 +4976,8 @@ class App:
         self.ctrl = ControlPanel(root, self.config, cbs); self.ctrl.grid(row=0, column=0, sticky='ns')
         self.plot_panel = PlotPanel(root); self.plot_panel.grid(row=0, column=1, sticky='nsew')
         self.plot_panel.init_layout("PLOT", self.config.algo_params['PLOT'])
+        self._ra_occ_snapshot_counter = 0
+        self._last_ra_occ_heatmap_snapshot = None
         self.pc_export_data = []  # 新增：用于存储点云导出数据的列表
         self.playback_queue = [] # 新增：存放待处理的文件路径队列
         self.playback_skip_state = False  # False 表示处理，True 表示跳过
@@ -4996,6 +4999,8 @@ class App:
         # 3. 【核心修复】强制算法处理器重新初始化参数
         # 这样当你修改了虚拟天线索引、频率范围等参数时，后端才会重新计算
         self.algo_processor.init_done = False 
+        if mode == 'RA-OCCUPANCY':
+            self._last_ra_occ_heatmap_snapshot = None
         print(f"参数已更新，算法 {mode} 将重新初始化...")
     def start(self):
         RadarProtocol.update_protocol(self.config.ft_len)
@@ -5014,6 +5019,8 @@ class App:
             # 实时模式逻辑不变
             self.source = LiveRadarSource(self.config)
             if not self.source.start(): return
+            self._ra_occ_snapshot_counter = 0
+            self._last_ra_occ_heatmap_snapshot = None
             self.algo_processor.init_done = False; self.running = True; self.loop()
     
     def _start_next_file(self):
@@ -5038,6 +5045,8 @@ class App:
         occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
         self.seat_detector = SeatOccupancyDetector(occ_params)
         self.ra_occupancy_detector = RAOccupancyDetector(occ_params)
+        self._ra_occ_snapshot_counter = 0
+        self._last_ra_occ_heatmap_snapshot = None
         # ------------------------------------
 
         print(f"开始处理 ({len(self.playback_queue)} 剩余): {os.path.basename(current_file)}")
@@ -5110,6 +5119,8 @@ class App:
                         self.playback_skip_state = False
                 # 根据状态决定是否送入 data_manager
                 if not self.playback_skip_state:
+                    if (tx, rx) == first_pair:
+                        self._ra_occ_snapshot_counter += 1
                     self.data_manager.process_frame(*f)
             
             # 只有在新帧触发了缓冲区更新后，才执行算法
@@ -5154,11 +5165,22 @@ class App:
                 elif m == 'RA-HEATMAP':
                     d = self.algo_processor.step_ra_heatmap_view()
                 elif m == 'RA-OCCUPANCY':
-                    d = self.algo_processor.step_ra_occupancy()
-                    if d:
-                        _, _, state = self.ra_occupancy_detector.process(d['energy'])
-                        d['occupancy'] = state  # 三态: 0=empty, 1=child, 2=adult (供着色)
-                        d['state'] = state
+                    p = self.config.algo_params['RA-OCCUPANCY']
+                    stride_combined = max(1, int(p.get('heatmap_update_stride_combined', 8)))
+                    cir_comb = max(1, int(p.get('cir_combine_num', 1)))
+                    stride_raw = stride_combined * cir_comb
+                    current_snapshot = self._ra_occ_snapshot_counter
+                    should_update = (
+                        self._last_ra_occ_heatmap_snapshot is None or
+                        current_snapshot - self._last_ra_occ_heatmap_snapshot >= stride_raw
+                    )
+                    if should_update:
+                        d = self.algo_processor.step_ra_occupancy()
+                        if d:
+                            self._last_ra_occ_heatmap_snapshot = current_snapshot
+                            _, _, state = self.ra_occupancy_detector.process(d['energy'])
+                            d['occupancy'] = state
+                            d['state'] = state
                 elif m == 'ANGLE-SPECTRUM':
                     d = self.algo_processor.step_angle_spectrum_view()
                 elif m == 'AS-RAW':
