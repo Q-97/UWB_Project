@@ -2,7 +2,7 @@
   "version": 1,
   "radar_config": {
     "ft_len": 32,
-    "max_snapshots": 127,
+    "max_snapshots": 144,
     "udp_tx_list": [
       1,
       2
@@ -18,7 +18,7 @@
     "num_rx_antennas": 4,
     "rx_antenna_start_num": 4,
     "connection_mode": "UDP",
-    "serial_port": "COM6",
+    "serial_port": "COM12",
     "baud_rate": 460800,
     "udp_ip": "127.0.0.1",
     "udp_port": 55555,
@@ -26,10 +26,10 @@
     "current_algo": "RA-OCCUPANCY",
     "snapshot_rate": 20,
     "tap_interval_si": 1e-09,
-    "data_save_dir": "D:/uwb occupy data collection and ai learn",
-    "record_filename": "occ_1_4.bin",
-    "record_duration": 10.0,
-    "playback_duration": 15.0,
+    "data_save_dir": "D:/uwb occupy data collection and ai learn/data",
+    "record_filename": "out_a1_2.bin",
+    "record_duration": 240.0,
+    "playback_duration": 240.0,
     "export_pc_json": false,
     "recent_save_dirs": [
       "D:/uwb occupy data collection and ai learn",
@@ -687,6 +687,7 @@
       "snapshots": 144,
       "cir_combine_num": 9,
       "leakage_offset": 5,
+      "range_bin_drop_front": 5,
       "doppler_window": "chebyshev",
       "doppler_win_atten": 60,
       "doppler_dc_remove": true,
@@ -709,14 +710,14 @@
       "azimuth_num": 64,
       "ant_calib_en": true,
       "ant_calib_phase": [
-        0.0,
-        0.19190371,
-        -1.417986,
-        -2.8394966,
-        0.07785571,
-        0.09267139,
-        -1.2703428,
-        -2.6441593
+        -0.0,
+        -0.49072375380773364,
+        1.1062868947533422,
+        1.5748289100316295,
+        -0.5876511374160144,
+        -1.9895222818981357,
+        0.12190304520431955,
+        0.5787126081848506
       ],
       "capon_diag_load": 0.001,
       "dist_per_tap": 0.1875,
@@ -724,6 +725,7 @@
         2,
         4
       ],
+      "heatmap_update_stride_combined": 8,
       "plot_xlim": 1.5,
       "plot_ylim_min": -2.5,
       "plot_ylim_max": -0.1,

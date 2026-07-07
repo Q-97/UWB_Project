@@ -1,0 +1,498 @@
+from __future__ import annotations
+
+import json
+from collections import deque
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+from PIL import Image
+
+
+# =========================
+# Easy-to-change parameters
+# =========================
+
+DATA_DIR_NAME = "data"
+MATRIX_OUTPUT_DIR_NAME = "2026_7_7_matrix"
+IMAGE_OUTPUT_DIR_NAME = "2026_7_7_heatmap"
+
+# Generate one heatmap every N combined slow-time bins.
+HEATMAP_STRIDE_COMBINED = 8
+
+# Drop the first N range bins before RA heatmap calculation.
+RANGE_BIN_DROP_FRONT = 5
+
+# PNG scale factor for visual readability. TXT keeps the original matrix size.
+IMAGE_SCALE = 10
+
+# Load current project config for antenna/calibration/RA parameters, then override
+# the two processing parameters above.
+USE_CONFIG_SAVE = True
+
+
+# =========================
+# Defaults aligned with GUI
+# =========================
+
+DEFAULT_RADAR_CONFIG = {
+    "ft_len": 32,
+    "max_snapshots": 144,
+    "udp_tx_list": [1, 2],
+    "udp_rx_list": [4, 5, 6, 7],
+    "bg_m_factor": 4,
+    "num_tx_antennas": 2,
+    "num_rx_antennas": 4,
+}
+
+DEFAULT_RA_OCCUPANCY_PARAMS = {
+    "center_freq": 7.9872e9,
+    "snapshots": 144,
+    "cir_combine_num": 9,
+    "leakage_offset": 5,
+    "range_bin_drop_front": RANGE_BIN_DROP_FRONT,
+    "indices_azimuth": [2, 3, 6, 7],
+    "azi_angle_range": [-60, 60],
+    "azimuth_num": 64,
+    "ant_calib_en": False,
+    "ant_calib_phase": [0.0] * 8,
+    "capon_diag_load": 1e-3,
+    "dist_per_tap": 0.1875,
+    "smooth_kernel": [2, 4],
+    "heatmap_update_stride_combined": HEATMAP_STRIDE_COMBINED,
+    "plot_xlim": 1.5,
+    "plot_ylim_min": -2.5,
+    "plot_ylim_max": -0.1,
+    "heatmap_clim_mode": "auto",
+    "heatmap_clim_vmin": 0,
+    "heatmap_clim_vmax": 100,
+}
+
+
+class RadarProtocol:
+    START_SIGN = b"\xff\x00\xff\x00"
+    HEADER_LEN = 4
+    FOOTER_LEN = 4
+    ANTENNA_INFO_LEN = 2
+
+    def __init__(self, ft_len: int):
+        self.ft_len = int(ft_len)
+        self.cir_data_len = self.ft_len * 4
+        self.frame_len = self.HEADER_LEN + self.ANTENNA_INFO_LEN + self.cir_data_len + self.FOOTER_LEN
+
+    def parse_frame(self, frame_bytes: bytes):
+        if len(frame_bytes) != self.frame_len:
+            return None
+        if not frame_bytes.startswith(self.START_SIGN):
+            return None
+        tx = frame_bytes[self.HEADER_LEN]
+        rx = frame_bytes[self.HEADER_LEN + 1]
+        cir = frame_bytes[self.HEADER_LEN + 2 : -self.FOOTER_LEN]
+        s16 = np.frombuffer(cir, dtype=np.int16)
+        c_data = s16[0::2].astype(np.float32) + 1j * s16[1::2].astype(np.float32)
+        return tx, rx, c_data
+
+
+class FixedBuffer:
+    def __init__(self, maxlen: int):
+        self.buffer = deque(maxlen=maxlen)
+        self._maxlen = maxlen
+
+    def append(self, item):
+        self.buffer.append(item)
+
+    def get_data(self):
+        return np.array(self.buffer) if self.buffer else np.array([])
+
+    def __len__(self):
+        return len(self.buffer)
+
+    def is_full(self):
+        return len(self.buffer) == self._maxlen
+
+
+class BackgroundRemoval:
+    def __init__(self, m_factor: float):
+        self.m_factor = m_factor
+        self.cir_ref: Optional[np.ndarray] = None
+        self.cir_abs_ref: Optional[np.ndarray] = None
+        self.first = True
+
+    def update(self, r: np.ndarray):
+        if self.first:
+            self.cir_ref = r.copy()
+            self.cir_abs_ref = np.abs(r)
+            self.first = False
+        else:
+            self.cir_ref = (1 - (1 / self.m_factor)) * self.cir_ref + r / self.m_factor
+            self.cir_abs_ref = (1 - (1 / self.m_factor)) * self.cir_abs_ref + np.abs(r) / self.m_factor
+
+    def remove_background(self, r: np.ndarray):
+        if self.first:
+            self.update(r)
+            return r, np.abs(r)
+        r_no_bg = r - self.cir_ref
+        r_abs_no_bg = np.abs(r) - self.cir_abs_ref
+        self.update(r)
+        return r_no_bg, r_abs_no_bg
+
+
+class RadarDataManager:
+    def __init__(self, radar_cfg: dict):
+        self.cfg = radar_cfg
+        self.pairs = [(tx, rx) for tx in radar_cfg["udp_tx_list"] for rx in radar_cfg["udp_rx_list"]]
+        self.snapshots_data = {
+            pair: {"complex": FixedBuffer(radar_cfg["max_snapshots"])}
+            for pair in self.pairs
+        }
+        self.bgs = {pair: BackgroundRemoval(radar_cfg["bg_m_factor"]) for pair in self.pairs}
+        self.buffer_full = False
+
+    def process_frame(self, tx: int, rx: int, raw: np.ndarray):
+        pair = (tx, rx)
+        if pair not in self.snapshots_data:
+            return
+        r_no_bg, _ = self.bgs[pair].remove_background(raw)
+        self.snapshots_data[pair]["complex"].append(r_no_bg)
+        if self.snapshots_data[self.pairs[0]]["complex"].is_full():
+            self.buffer_full = True
+
+    def min_len(self) -> int:
+        return min(len(self.snapshots_data[p]["complex"]) for p in self.pairs)
+
+    def get_all_snapshot_as_array(self):
+        if not self.buffer_full:
+            return None
+        target_len = min(self.cfg["max_snapshots"], self.min_len())
+        if target_len <= 0:
+            return None
+
+        arr = np.zeros(
+            (
+                self.cfg["num_rx_antennas"],
+                self.cfg["num_tx_antennas"],
+                self.cfg["ft_len"],
+                target_len,
+            ),
+            dtype=np.complex64,
+        )
+        tx_map = {v: i for i, v in enumerate(self.cfg["udp_tx_list"])}
+        rx_map = {v: i for i, v in enumerate(self.cfg["udp_rx_list"])}
+        for (tx, rx), buffs in self.snapshots_data.items():
+            if tx in tx_map and rx in rx_map:
+                data_slice = buffs["complex"].get_data()[:target_len].T
+                arr[rx_map[rx], tx_map[tx], :, :] = data_slice
+        return arr
+
+
+def load_project_config(base_dir: Path):
+    radar_cfg = dict(DEFAULT_RADAR_CONFIG)
+    params = dict(DEFAULT_RA_OCCUPANCY_PARAMS)
+    config_path = base_dir / "config_save.json"
+
+    if USE_CONFIG_SAVE and config_path.exists():
+        with config_path.open("r", encoding="utf-8") as f:
+            saved = json.load(f)
+        radar_cfg.update(saved.get("radar_config", {}))
+        params.update(saved.get("algo_params", {}).get("RA-OCCUPANCY", {}))
+
+    params["range_bin_drop_front"] = RANGE_BIN_DROP_FRONT
+    params["heatmap_update_stride_combined"] = HEATMAP_STRIDE_COMBINED
+    return radar_cfg, params
+
+
+def init_capon_steering(params: dict):
+    wavelength = 2.99792458e8 / params.get("center_freq", 7.9872e9)
+    all_virt_x = np.array([-0.038, 0.0, -0.038, -0.019, 0.0, 0.038, 0.0, 0.019])
+    channels = np.array(params.get("indices_azimuth", [2, 3, 6, 7]), dtype=int)
+    ant_x = all_virt_x[channels] / wavelength
+
+    azi_deg = np.linspace(
+        params["azi_angle_range"][0],
+        params["azi_angle_range"][1],
+        int(params["azimuth_num"]),
+    )
+    capon_angles = np.deg2rad(azi_deg)
+    capon_sv = np.exp(1j * 2 * np.pi * ant_x[:, np.newaxis] * np.sin(capon_angles[np.newaxis, :]))
+
+    if params.get("ant_calib_en", False):
+        calib_phase = np.array(params.get("ant_calib_phase", [0.0] * 8), dtype=np.float64)
+        capon_sv = capon_sv * np.exp(1j * calib_phase[channels]).reshape(-1, 1)
+
+    return capon_angles, capon_sv
+
+
+def compute_ra_heatmap(all_c: np.ndarray, params: dict, capon_angles: np.ndarray, capon_sv: np.ndarray):
+    n_snaps = int(params["snapshots"])
+    cir_comb = max(1, int(params.get("cir_combine_num", 1)))
+    current_cube = all_c[:, :, :, -n_snaps:]
+
+    if cir_comb > 1:
+        n_comb = current_cube.shape[3] // cir_comb
+        if n_comb <= 0:
+            return None
+        trim = n_comb * cir_comb
+        current_cube = (
+            current_cube[:, :, :16, :trim]
+            .reshape(4, 2, 16, n_comb, cir_comb)
+            .mean(axis=4)
+        )
+
+    drop_front = int(params.get("range_bin_drop_front", 0) or 0)
+    if drop_front > 0:
+        drop_front = min(drop_front, max(0, current_cube.shape[2] - 1))
+        current_cube = current_cube[:, :, drop_front:, :]
+    else:
+        leakage_offset = int(params.get("leakage_offset", 0))
+        current_cube = np.roll(current_cube, -leakage_offset, axis=2)
+
+    cube_flat = current_cube.transpose(1, 0, 2, 3).reshape(
+        8, current_cube.shape[2], current_cube.shape[3]
+    )
+    valid_indices = params.get("indices_azimuth", [2, 3, 6, 7])
+    a_all = cube_flat[valid_indices, :, :]
+
+    k_count = a_all.shape[1]
+    angle_count = len(capon_angles)
+    slow_count = a_all.shape[2]
+    diag_load = params.get("capon_diag_load", 1e-3)
+    h = np.zeros((k_count, angle_count), dtype=np.float64)
+
+    for k_idx in range(k_count):
+        a_k = a_all[:, k_idx, :]
+        r_k = (a_k @ a_k.conj().T) / slow_count
+        r_k += np.eye(a_k.shape[0]) * diag_load * np.abs(np.trace(r_k))
+        try:
+            r_inv = np.linalg.inv(r_k)
+        except np.linalg.LinAlgError:
+            continue
+        denom = np.sum((capon_sv.conj() * (r_inv @ capon_sv)), axis=0)
+        h[k_idx, :] = 1.0 / np.real(np.clip(denom, 1e-12, None))
+
+    ranges_m = np.arange(k_count) * params["dist_per_tap"]
+    angles_deg = np.rad2deg(capon_angles)
+    return h, ranges_m, angles_deg
+
+
+def ra_to_cartesian(h: np.ndarray, ranges_m: np.ndarray, angles_deg: np.ndarray, params: dict):
+    xlim = params.get("plot_xlim", 1.5)
+    y_min = params.get("plot_ylim_min", -2.5)
+    y_max = params.get("plot_ylim_max", -0.1)
+    res = 0.05
+    xs = np.arange(-xlim, xlim + res, res)
+    ys = np.arange(y_min, y_max + res, res)
+    x_grid, y_grid = np.meshgrid(xs, ys)
+
+    r_grid = np.sqrt(x_grid**2 + y_grid**2)
+    a_grid = np.rad2deg(np.arctan2(x_grid, -y_grid))
+    h_cart = bilinear_interpolate_grid(ranges_m, angles_deg, h, r_grid, a_grid, fill_value=0.0)
+    return h_cart, xs, ys
+
+
+def bilinear_interpolate_grid(
+    range_axis: np.ndarray,
+    angle_axis: np.ndarray,
+    values: np.ndarray,
+    r_query: np.ndarray,
+    a_query: np.ndarray,
+    fill_value: float = 0.0,
+):
+    out = np.full(r_query.shape, fill_value, dtype=np.float64)
+    if len(range_axis) < 2 or len(angle_axis) < 2:
+        return out
+
+    r0 = range_axis[0]
+    a0 = angle_axis[0]
+    dr = range_axis[1] - range_axis[0]
+    da = angle_axis[1] - angle_axis[0]
+    if dr == 0 or da == 0:
+        return out
+
+    rf = (r_query - r0) / dr
+    af = (a_query - a0) / da
+    valid = (rf >= 0) & (rf <= len(range_axis) - 1) & (af >= 0) & (af <= len(angle_axis) - 1)
+    if not np.any(valid):
+        return out
+
+    ri0 = np.floor(rf[valid]).astype(int)
+    ai0 = np.floor(af[valid]).astype(int)
+    ri0 = np.clip(ri0, 0, len(range_axis) - 2)
+    ai0 = np.clip(ai0, 0, len(angle_axis) - 2)
+    ri1 = ri0 + 1
+    ai1 = ai0 + 1
+
+    wr = rf[valid] - ri0
+    wa = af[valid] - ai0
+
+    v00 = values[ri0, ai0]
+    v10 = values[ri1, ai0]
+    v01 = values[ri0, ai1]
+    v11 = values[ri1, ai1]
+    out[valid] = (
+        (1 - wr) * (1 - wa) * v00
+        + wr * (1 - wa) * v10
+        + (1 - wr) * wa * v01
+        + wr * wa * v11
+    )
+    return out
+
+
+def convolve_reflect_2d(matrix: np.ndarray, kernel: np.ndarray):
+    kh, kw = kernel.shape
+    pad_top = kh // 2
+    pad_bottom = kh - 1 - pad_top
+    pad_left = kw // 2
+    pad_right = kw - 1 - pad_left
+    padded = np.pad(matrix, ((pad_top, pad_bottom), (pad_left, pad_right)), mode="reflect")
+    out = np.zeros_like(matrix, dtype=np.float64)
+    for row in range(matrix.shape[0]):
+        for col in range(matrix.shape[1]):
+            out[row, col] = np.sum(padded[row : row + kh, col : col + kw] * kernel)
+    return out
+
+
+def make_heatmap_outputs(all_c: np.ndarray, params: dict, capon_angles: np.ndarray, capon_sv: np.ndarray):
+    computed = compute_ra_heatmap(all_c, params, capon_angles, capon_sv)
+    if computed is None:
+        return None
+
+    h, ranges_m, angles_deg = computed
+    h_sq_mean = np.sqrt(np.sum(np.square(h)) / (h.shape[0] * h.shape[1]))
+    h_bg = h - h_sq_mean
+
+    kernel_size = params.get("smooth_kernel", [2, 4])
+    smooth_kernel = np.ones((kernel_size[0], kernel_size[1])) / (kernel_size[0] * kernel_size[1])
+    h_bg = convolve_reflect_2d(h_bg, smooth_kernel)
+
+    h_cart, xs, ys = ra_to_cartesian(h_bg, ranges_m, angles_deg, params)
+    return h_bg, h_cart, xs, ys
+
+
+def save_heatmap_image(matrix: np.ndarray, path: Path, params: dict):
+    if params.get("heatmap_clim_mode", "auto") == "fixed":
+        vmin = params.get("heatmap_clim_vmin", 0)
+        vmax = params.get("heatmap_clim_vmax", 100)
+    else:
+        valid = matrix[np.isfinite(matrix)]
+        if valid.size:
+            vmin = max(-80, np.percentile(valid, 5))
+            vmax = np.max(valid)
+            if vmin >= vmax:
+                vmin = vmax - 1.0
+        else:
+            vmin, vmax = 0.0, 1.0
+
+    norm = np.clip((matrix - vmin) / (vmax - vmin + 1e-12), 0.0, 1.0)
+    rgb = jet_colormap(norm)
+    # Matrix origin is lower in the GUI; PNG row 0 is top, so flip vertically.
+    img = Image.fromarray(np.flipud(rgb), mode="RGB")
+    if IMAGE_SCALE > 1:
+        img = img.resize((img.width * IMAGE_SCALE, img.height * IMAGE_SCALE), Image.Resampling.BILINEAR)
+    img.save(path)
+
+
+def jet_colormap(norm: np.ndarray):
+    x = np.asarray(norm)
+    r = np.clip(1.5 - np.abs(4.0 * x - 3.0), 0.0, 1.0)
+    g = np.clip(1.5 - np.abs(4.0 * x - 2.0), 0.0, 1.0)
+    b = np.clip(1.5 - np.abs(4.0 * x - 1.0), 0.0, 1.0)
+    return (np.stack([r, g, b], axis=-1) * 255).astype(np.uint8)
+
+
+def process_bin_file(bin_path: Path, matrix_output_dir: Path, image_output_dir: Path, radar_cfg: dict, params: dict):
+    protocol = RadarProtocol(radar_cfg["ft_len"])
+    data_manager = RadarDataManager(radar_cfg)
+    capon_angles, capon_sv = init_capon_steering(params)
+
+    first_pair = (radar_cfg["udp_tx_list"][0], radar_cfg["udp_rx_list"][0])
+    last_pair = (radar_cfg["udp_tx_list"][-1], radar_cfg["udp_rx_list"][-1])
+    cir_comb = max(1, int(params.get("cir_combine_num", 1)))
+    stride_raw = max(1, int(params.get("heatmap_update_stride_combined", 8))) * cir_comb
+
+    snapshot_counter = 0
+    last_heatmap_snapshot: Optional[int] = None
+    output_index = 0
+    skipped_frames = 0
+
+    with bin_path.open("rb") as f:
+        while True:
+            chunk = f.read(protocol.frame_len)
+            if not chunk:
+                break
+            if len(chunk) < protocol.frame_len:
+                skipped_frames += 1
+                break
+
+            parsed = protocol.parse_frame(chunk)
+            if parsed is None:
+                skipped_frames += 1
+                continue
+
+            tx, rx, raw = parsed
+            if (tx, rx) == first_pair:
+                snapshot_counter += 1
+
+            data_manager.process_frame(tx, rx, raw)
+
+            if (tx, rx) != last_pair or not data_manager.buffer_full:
+                continue
+
+            should_update = (
+                last_heatmap_snapshot is None
+                or snapshot_counter - last_heatmap_snapshot >= stride_raw
+            )
+            if not should_update:
+                continue
+
+            all_c = data_manager.get_all_snapshot_as_array()
+            if all_c is None:
+                continue
+
+            result = make_heatmap_outputs(all_c, params, capon_angles, capon_sv)
+            if result is None:
+                continue
+
+            h_bg, h_cart, _, _ = result
+            output_index += 1
+            last_heatmap_snapshot = snapshot_counter
+
+            out_name = f"{bin_path.stem}_{output_index}"
+            np.savetxt((matrix_output_dir / out_name).with_suffix(".txt"), h_bg, fmt="%.10e")
+            save_heatmap_image(
+                h_cart,
+                (image_output_dir / out_name).with_suffix(".png"),
+                params,
+            )
+
+    print(
+        f"{bin_path.name}: saved {output_index} matrices/heatmaps"
+        + (f", skipped {skipped_frames} malformed frame(s)" if skipped_frames else "")
+    )
+
+
+def main():
+    base_dir = Path(__file__).resolve().parent
+    data_dir = base_dir / DATA_DIR_NAME
+    matrix_output_dir = base_dir / MATRIX_OUTPUT_DIR_NAME
+    image_output_dir = base_dir / IMAGE_OUTPUT_DIR_NAME
+    matrix_output_dir.mkdir(parents=True, exist_ok=True)
+    image_output_dir.mkdir(parents=True, exist_ok=True)
+
+    radar_cfg, params = load_project_config(base_dir)
+    bin_files = sorted(data_dir.glob("*.bin"))
+    if not bin_files:
+        print(f"No .bin files found in {data_dir}")
+        return
+
+    print(f"Input folder: {data_dir}")
+    print(f"Matrix output folder: {matrix_output_dir}")
+    print(f"Image output folder: {image_output_dir}")
+    print(f"range_bin_drop_front={RANGE_BIN_DROP_FRONT}")
+    print(f"heatmap_stride_combined={HEATMAP_STRIDE_COMBINED}")
+
+    for bin_path in bin_files:
+        process_bin_file(bin_path, matrix_output_dir, image_output_dir, radar_cfg, params)
+
+
+if __name__ == "__main__":
+    main()
