@@ -21,10 +21,6 @@ import matplotlib.pyplot as plt
 # 数据位置
 DATA_DIR_NAME = "data"
 
-# 结果保存位置
-MATRIX_OUTPUT_DIR_NAME = "2026_7_7_matrix"
-IMAGE_OUTPUT_DIR_NAME = "2026_7_7_heatmap"
-
 # 保存图片标志位
 fig_save_flag = True
 
@@ -36,10 +32,15 @@ RANGE_BIN_DROP_FRONT = 4
 
 # 放大和heatmap倍数
 IMAGE_SCALE = 10
+MATRIX_PATH_COUNT = 4
 
 # 读取config_save并覆盖GUI参数
 USE_CONFIG_SAVE = False
 
+# 结果保存位置
+OUTPUT_TAG = f"combined={HEATMAP_STRIDE_COMBINED}_drop={RANGE_BIN_DROP_FRONT}_path={MATRIX_PATH_COUNT}"
+MATRIX_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_matrix"
+IMAGE_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_heatmap"
 
 # =========================
 # GUI参数
@@ -368,6 +369,17 @@ def save_heatmap_image(matrix: np.ndarray, path: Path, params: dict):
     fig.savefig(path, dpi=dpi, pad_inches=0)
     plt.close(fig)
 
+
+def save_matrix_sample(matrix: np.ndarray, path: Path):
+    with path.open("w", encoding="utf-8") as f:
+        f.write(f"# shape {' '.join(str(v) for v in matrix.shape)}\n")
+        for idx in range(matrix.shape[0]):
+            f.write(f"# slice {idx}\n")
+            np.savetxt(f, matrix[idx], fmt="%.10e")
+            if idx != matrix.shape[0] - 1:
+                f.write("\n")
+
+
 def process_bin_file(
     bin_path: Path,
     matrix_output_dir: Path,
@@ -388,6 +400,9 @@ def process_bin_file(
     snapshot_counter = 0
     last_heatmap_snapshot: Optional[int] = None
     output_index = 0
+    heatmap_index = 0
+    matrix_output_index = 0
+    matrix_group = []
     skipped_frames = 0
 
     with bin_path.open("rb") as f:
@@ -431,19 +446,31 @@ def process_bin_file(
             h_bg, h_cart, _, _ = result
             output_index += 1
             last_heatmap_snapshot = snapshot_counter
+            if output_index == 1:
+                continue
 
-            out_name = f"{bin_path.stem}_{output_index}"
-            np.savetxt((matrix_output_dir / out_name).with_suffix(".txt"), h_bg, fmt="%.10e")
+            heatmap_index += 1
+            image_name = f"{bin_path.stem}_{heatmap_index}"
             if fig_save_flag:
                 save_heatmap_image(
                     h_cart,
-                    (image_output_dir / out_name).with_suffix(".png"),
+                    (image_output_dir / image_name).with_suffix(".png"),
                     params,
                 )
 
+            matrix_group.append(h_bg)
+            if len(matrix_group) == MATRIX_PATH_COUNT:
+                stacked = np.stack(matrix_group, axis=0)
+                output_matrix = np.transpose(stacked, (2, 1, 0))
+                matrix_output_index += 1
+                matrix_name = f"{bin_path.stem}_path={MATRIX_PATH_COUNT}_{matrix_output_index}"
+                save_matrix_sample(output_matrix, (matrix_output_dir / matrix_name).with_suffix(".txt"))
+                matrix_group.clear()
+
     output_label = "matrices/heatmaps" if fig_save_flag else "matrices"
     print(
-        f"{bin_path.name}: saved {output_index} {output_label}"
+        f"{bin_path.name}: saved {matrix_output_index} matrix sample(s), {heatmap_index} heatmap(s)"
+        + (f", discarded {len(matrix_group)} ungrouped matrix/matrices" if matrix_group else "")
         + (f", skipped {skipped_frames} malformed frame(s)" if skipped_frames else "")
     )
 
