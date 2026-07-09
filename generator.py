@@ -5,8 +5,13 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
+import matplotlib
 import numpy as np
-from PIL import Image
+from scipy import ndimage
+from scipy.interpolate import RegularGridInterpolator
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 # =========================
@@ -24,10 +29,10 @@ IMAGE_OUTPUT_DIR_NAME = "2026_7_7_heatmap"
 fig_save_flag = True
 
 # 每次滑动bin的数量
-HEATMAP_STRIDE_COMBINED = 8
+HEATMAP_STRIDE_COMBINED = 4
 
 # 丢弃range bin的数量
-RANGE_BIN_DROP_FRONT = 5
+RANGE_BIN_DROP_FRONT = 4
 
 # 放大和heatmap倍数
 IMAGE_SCALE = 10
@@ -297,76 +302,22 @@ def ra_to_cartesian(h: np.ndarray, ranges_m: np.ndarray, angles_deg: np.ndarray,
     y_min = params.get("plot_ylim_min", -2.5)
     y_max = params.get("plot_ylim_max", -0.1)
     res = 0.05
+    interp = RegularGridInterpolator(
+        (ranges_m, angles_deg),
+        h,
+        bounds_error=False,
+        fill_value=0.0,
+    )
+
     xs = np.arange(-xlim, xlim + res, res)
     ys = np.arange(y_min, y_max + res, res)
     x_grid, y_grid = np.meshgrid(xs, ys)
 
     r_grid = np.sqrt(x_grid**2 + y_grid**2)
     a_grid = np.rad2deg(np.arctan2(x_grid, -y_grid))
-    h_cart = bilinear_interpolate_grid(ranges_m, angles_deg, h, r_grid, a_grid, fill_value=0.0)
+    pts = np.stack([r_grid.ravel(), a_grid.ravel()], axis=1)
+    h_cart = interp(pts).reshape(len(ys), len(xs))
     return h_cart, xs, ys
-
-
-def bilinear_interpolate_grid(
-    range_axis: np.ndarray,
-    angle_axis: np.ndarray,
-    values: np.ndarray,
-    r_query: np.ndarray,
-    a_query: np.ndarray,
-    fill_value: float = 0.0,
-):
-    out = np.full(r_query.shape, fill_value, dtype=np.float64)
-    if len(range_axis) < 2 or len(angle_axis) < 2:
-        return out
-
-    r0 = range_axis[0]
-    a0 = angle_axis[0]
-    dr = range_axis[1] - range_axis[0]
-    da = angle_axis[1] - angle_axis[0]
-    if dr == 0 or da == 0:
-        return out
-
-    rf = (r_query - r0) / dr
-    af = (a_query - a0) / da
-    valid = (rf >= 0) & (rf <= len(range_axis) - 1) & (af >= 0) & (af <= len(angle_axis) - 1)
-    if not np.any(valid):
-        return out
-
-    ri0 = np.floor(rf[valid]).astype(int)
-    ai0 = np.floor(af[valid]).astype(int)
-    ri0 = np.clip(ri0, 0, len(range_axis) - 2)
-    ai0 = np.clip(ai0, 0, len(angle_axis) - 2)
-    ri1 = ri0 + 1
-    ai1 = ai0 + 1
-
-    wr = rf[valid] - ri0
-    wa = af[valid] - ai0
-
-    v00 = values[ri0, ai0]
-    v10 = values[ri1, ai0]
-    v01 = values[ri0, ai1]
-    v11 = values[ri1, ai1]
-    out[valid] = (
-        (1 - wr) * (1 - wa) * v00
-        + wr * (1 - wa) * v10
-        + (1 - wr) * wa * v01
-        + wr * wa * v11
-    )
-    return out
-
-
-def convolve_reflect_2d(matrix: np.ndarray, kernel: np.ndarray):
-    kh, kw = kernel.shape
-    pad_top = kh // 2
-    pad_bottom = kh - 1 - pad_top
-    pad_left = kw // 2
-    pad_right = kw - 1 - pad_left
-    padded = np.pad(matrix, ((pad_top, pad_bottom), (pad_left, pad_right)), mode="reflect")
-    out = np.zeros_like(matrix, dtype=np.float64)
-    for row in range(matrix.shape[0]):
-        for col in range(matrix.shape[1]):
-            out[row, col] = np.sum(padded[row : row + kh, col : col + kw] * kernel)
-    return out
 
 
 def make_heatmap_outputs(all_c: np.ndarray, params: dict, capon_angles: np.ndarray, capon_sv: np.ndarray):
@@ -380,7 +331,7 @@ def make_heatmap_outputs(all_c: np.ndarray, params: dict, capon_angles: np.ndarr
 
     kernel_size = params.get("smooth_kernel", [2, 4])
     smooth_kernel = np.ones((kernel_size[0], kernel_size[1])) / (kernel_size[0] * kernel_size[1])
-    h_bg = convolve_reflect_2d(h_bg, smooth_kernel)
+    h_bg = ndimage.convolve(h_bg, smooth_kernel, mode="reflect")
 
     h_cart, xs, ys = ra_to_cartesian(h_bg, ranges_m, angles_deg, params)
     return h_bg, h_cart, xs, ys
@@ -400,22 +351,22 @@ def save_heatmap_image(matrix: np.ndarray, path: Path, params: dict):
         else:
             vmin, vmax = 0.0, 1.0
 
-    norm = np.clip((matrix - vmin) / (vmax - vmin + 1e-12), 0.0, 1.0)
-    rgb = jet_colormap(norm)
-    # Matrix origin is lower in the GUI; PNG row 0 is top, so flip vertically.
-    img = Image.fromarray(np.flipud(rgb), mode="RGB")
-    if IMAGE_SCALE > 1:
-        img = img.resize((img.width * IMAGE_SCALE, img.height * IMAGE_SCALE), Image.Resampling.BILINEAR)
-    img.save(path)
-
-
-def jet_colormap(norm: np.ndarray):
-    x = np.asarray(norm)
-    r = np.clip(1.5 - np.abs(4.0 * x - 3.0), 0.0, 1.0)
-    g = np.clip(1.5 - np.abs(4.0 * x - 2.0), 0.0, 1.0)
-    b = np.clip(1.5 - np.abs(4.0 * x - 1.0), 0.0, 1.0)
-    return (np.stack([r, g, b], axis=-1) * 255).astype(np.uint8)
-
+    height, width = matrix.shape
+    dpi = 100
+    fig = plt.figure(figsize=(width * IMAGE_SCALE / dpi, height * IMAGE_SCALE / dpi), dpi=dpi)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.imshow(
+        matrix,
+        cmap="jet",
+        origin="lower",
+        interpolation="bilinear",
+        vmin=vmin,
+        vmax=vmax,
+        aspect="equal",
+    )
+    ax.set_axis_off()
+    fig.savefig(path, dpi=dpi, pad_inches=0)
+    plt.close(fig)
 
 def process_bin_file(
     bin_path: Path,
