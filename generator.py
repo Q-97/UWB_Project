@@ -372,9 +372,7 @@ def save_heatmap_image(matrix: np.ndarray, path: Path, params: dict):
 
 def save_matrix_sample(matrix: np.ndarray, path: Path):
     with path.open("w", encoding="utf-8") as f:
-        f.write(f"# shape {' '.join(str(v) for v in matrix.shape)}\n")
         for idx in range(matrix.shape[0]):
-            f.write(f"# slice {idx}\n")
             np.savetxt(f, matrix[idx], fmt="%.10e")
             if idx != matrix.shape[0] - 1:
                 f.write("\n")
