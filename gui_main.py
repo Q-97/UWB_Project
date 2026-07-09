@@ -4702,10 +4702,10 @@ class ControlPanel(tk.Frame):
         if not person_id:
             person_id = "a1"
         if self.var_io_mode.get() == 'out':
-            return f"out_{person_id}.bin"
+            return f"out_{person_id}_1.bin"
         area_pos = f"{self.var_record_area.get()}{self.var_record_pos.get()}"
         pose = self.var_record_pose.get()
-        return f"in_{person_id}_{area_pos}_{pose}.bin"
+        return f"in_{person_id}_{area_pos}_{pose}_1.bin"
 
     def _normalize_record_filename(self, filename):
         filename = filename.strip()
@@ -4719,14 +4719,19 @@ class ControlPanel(tk.Frame):
     def _get_unique_filepath(self, directory, base_name):
         """在 directory 下找不冲突的文件名, 必要时加 _2, _3... 后缀.
         返回 (完整路径, 实际使用的文件名)."""
-        base_stem = base_name.rsplit('.', 1)[0]
-        ext = '.bin'
-        candidate = os.path.join(directory, base_name)
-        if not os.path.exists(candidate):
-            return candidate, base_name
-        n = 2
+        base_stem, ext = os.path.splitext(base_name)
+        if not ext:
+            ext = '.bin'
+        prefix = base_stem
+        start_index = 1
+        if '_' in base_stem:
+            maybe_prefix, maybe_index = base_stem.rsplit('_', 1)
+            if maybe_index.isdigit():
+                prefix = maybe_prefix
+                start_index = max(1, int(maybe_index))
+        n = start_index
         while True:
-            new_name = f"{base_stem}_{n}{ext}"
+            new_name = f"{prefix}_{n}{ext}"
             candidate = os.path.join(directory, new_name)
             if not os.path.exists(candidate):
                 return candidate, new_name
@@ -4938,6 +4943,7 @@ class ControlPanel(tk.Frame):
             self._speak_async("结束采样")
             self.recording_state = False
             self.btn_rec.config(bg='#ddd', text="Start Recording")
+            self._refresh_filename_preview()
 
     def update_ui(self, run, rec, rec_time, fps, pb_prog):
         # 系统状态
@@ -4949,6 +4955,7 @@ class ControlPanel(tk.Frame):
         if self.config.connection_mode != 'PLAYBACK':
             # 如果系统未运行，通常不允许录制，或者允许录制空数据？通常是不允许
             self.btn_rec.config(state='normal' if run else 'disabled')
+            was_recording = self.recording_state
             
             # 检测实际录制状态 (rec 是从 backend 传来的真实状态)
             if rec:
@@ -4961,6 +4968,9 @@ class ControlPanel(tk.Frame):
             else:
                 self.recording_state = False
                 self.btn_rec.config(text="Start Recording", bg='#ddd')
+                if was_recording:
+                    self._clear_record_speech()
+                    self._refresh_filename_preview()
         
         # --- [新增] 更新进度条逻辑 ---
         if self.config.connection_mode == 'PLAYBACK':

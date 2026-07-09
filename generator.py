@@ -10,29 +10,34 @@ from PIL import Image
 
 
 # =========================
-# Easy-to-change parameters
+# 参数修改
 # =========================
 
+# 数据位置
 DATA_DIR_NAME = "data"
+
+# 结果保存位置
 MATRIX_OUTPUT_DIR_NAME = "2026_7_7_matrix"
 IMAGE_OUTPUT_DIR_NAME = "2026_7_7_heatmap"
 
-# Generate one heatmap every N combined slow-time bins.
+# 保存图片标志位
+fig_save_flag = True
+
+# 每次滑动bin的数量
 HEATMAP_STRIDE_COMBINED = 8
 
-# Drop the first N range bins before RA heatmap calculation.
+# 丢弃range bin的数量
 RANGE_BIN_DROP_FRONT = 5
 
-# PNG scale factor for visual readability. TXT keeps the original matrix size.
+# 放大和heatmap倍数
 IMAGE_SCALE = 10
 
-# Load current project config for antenna/calibration/RA parameters, then override
-# the two processing parameters above.
-USE_CONFIG_SAVE = True
+# 读取config_save并覆盖GUI参数
+USE_CONFIG_SAVE = False
 
 
 # =========================
-# Defaults aligned with GUI
+# GUI参数
 # =========================
 
 DEFAULT_RADAR_CONFIG = {
@@ -399,7 +404,14 @@ def jet_colormap(norm: np.ndarray):
     return (np.stack([r, g, b], axis=-1) * 255).astype(np.uint8)
 
 
-def process_bin_file(bin_path: Path, matrix_output_dir: Path, image_output_dir: Path, radar_cfg: dict, params: dict):
+def process_bin_file(
+    bin_path: Path,
+    matrix_output_dir: Path,
+    image_output_dir: Path,
+    radar_cfg: dict,
+    params: dict,
+    fig_save_flag: bool = True,
+):
     protocol = RadarProtocol(radar_cfg["ft_len"])
     data_manager = RadarDataManager(radar_cfg)
     capon_angles, capon_sv = init_capon_steering(params)
@@ -458,14 +470,16 @@ def process_bin_file(bin_path: Path, matrix_output_dir: Path, image_output_dir: 
 
             out_name = f"{bin_path.stem}_{output_index}"
             np.savetxt((matrix_output_dir / out_name).with_suffix(".txt"), h_bg, fmt="%.10e")
-            save_heatmap_image(
-                h_cart,
-                (image_output_dir / out_name).with_suffix(".png"),
-                params,
-            )
+            if fig_save_flag:
+                save_heatmap_image(
+                    h_cart,
+                    (image_output_dir / out_name).with_suffix(".png"),
+                    params,
+                )
 
+    output_label = "matrices/heatmaps" if fig_save_flag else "matrices"
     print(
-        f"{bin_path.name}: saved {output_index} matrices/heatmaps"
+        f"{bin_path.name}: saved {output_index} {output_label}"
         + (f", skipped {skipped_frames} malformed frame(s)" if skipped_frames else "")
     )
 
@@ -476,7 +490,8 @@ def main():
     matrix_output_dir = base_dir / MATRIX_OUTPUT_DIR_NAME
     image_output_dir = base_dir / IMAGE_OUTPUT_DIR_NAME
     matrix_output_dir.mkdir(parents=True, exist_ok=True)
-    image_output_dir.mkdir(parents=True, exist_ok=True)
+    if fig_save_flag:
+        image_output_dir.mkdir(parents=True, exist_ok=True)
 
     radar_cfg, params = load_project_config(base_dir)
     bin_files = sorted(data_dir.glob("*.bin"))
@@ -486,12 +501,12 @@ def main():
 
     print(f"Input folder: {data_dir}")
     print(f"Matrix output folder: {matrix_output_dir}")
-    print(f"Image output folder: {image_output_dir}")
+    print(f"Image output folder: {image_output_dir if fig_save_flag else 'disabled'}")
     print(f"range_bin_drop_front={RANGE_BIN_DROP_FRONT}")
     print(f"heatmap_stride_combined={HEATMAP_STRIDE_COMBINED}")
 
     for bin_path in bin_files:
-        process_bin_file(bin_path, matrix_output_dir, image_output_dir, radar_cfg, params)
+        process_bin_file(bin_path, matrix_output_dir, image_output_dir, radar_cfg, params, fig_save_flag)
 
 
 if __name__ == "__main__":
