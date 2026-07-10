@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 DATA_DIR_NAME = "data"
 
 # 保存图片标志位
-fig_save_flag = True
+fig_save_flag = False
 
 # 每次滑动bin的数量
 HEATMAP_STRIDE_COMBINED = 4
@@ -39,7 +39,7 @@ USE_CONFIG_SAVE = False
 
 # 结果保存位置
 OUTPUT_TAG = f"combined={HEATMAP_STRIDE_COMBINED}_drop={RANGE_BIN_DROP_FRONT}_path={MATRIX_PATH_COUNT}"
-MATRIX_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_matrix"
+MATRIX_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_matrix_h_norm"
 IMAGE_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_heatmap"
 
 # =========================
@@ -327,16 +327,23 @@ def make_heatmap_outputs(all_c: np.ndarray, params: dict, capon_angles: np.ndarr
         return None
 
     h, ranges_m, angles_deg = computed
-    h_sq_mean = np.sqrt(np.sum(np.square(h)) / (h.shape[0] * h.shape[1]))
-    h_bg = h - h_sq_mean
+    h_sq_noise = np.sqrt(np.sum(np.square(h)) / (h.shape[0] * h.shape[1]))
+    # H_sq_mean = np.sum(H) / (H.shape[0] * H.shape[1])
+    h_bg = h - h_sq_noise
 
     kernel_size = params.get("smooth_kernel", [2, 4])
     smooth_kernel = np.ones((kernel_size[0], kernel_size[1])) / (kernel_size[0] * kernel_size[1])
     h_bg = ndimage.convolve(h_bg, smooth_kernel, mode="reflect")
 
     h_cart, xs, ys = ra_to_cartesian(h_bg, ranges_m, angles_deg, params)
-    return h_bg, h_cart, xs, ys
+    return h, h_bg, h_cart, xs, ys
 
+def normalize_data(matrix: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    mean = np.mean(matrix)
+    std = np.std(matrix)
+    if std <= eps:
+        return matrix
+    return (matrix - mean) / std
 
 def save_heatmap_image(matrix: np.ndarray, path: Path, params: dict):
     if params.get("heatmap_clim_mode", "auto") == "fixed":
@@ -374,8 +381,6 @@ def save_matrix_sample(matrix: np.ndarray, path: Path):
     with path.open("w", encoding="utf-8") as f:
         for idx in range(matrix.shape[0]):
             np.savetxt(f, matrix[idx], fmt="%.10e")
-            if idx != matrix.shape[0] - 1:
-                f.write("\n")
 
 
 def process_bin_file(
@@ -438,10 +443,12 @@ def process_bin_file(
                 continue
 
             result = make_heatmap_outputs(all_c, params, capon_angles, capon_sv)
+
             if result is None:
                 continue
 
-            h_bg, h_cart, _, _ = result
+            h, h_bg, h_cart, _, _ = result
+            h_norm = normalize_data(h)
             output_index += 1
             last_heatmap_snapshot = snapshot_counter
             if output_index == 1:
@@ -456,14 +463,14 @@ def process_bin_file(
                     params,
                 )
 
-            matrix_group.append(h_bg)
+            matrix_group.append(h_norm)
             if len(matrix_group) == MATRIX_PATH_COUNT:
                 stacked = np.stack(matrix_group, axis=0)
                 output_matrix = np.transpose(stacked, (2, 1, 0))
                 matrix_output_index += 1
                 matrix_name = f"{bin_path.stem}_path={MATRIX_PATH_COUNT}_{matrix_output_index}"
                 save_matrix_sample(output_matrix, (matrix_output_dir / matrix_name).with_suffix(".txt"))
-                matrix_group.clear()
+                matrix_group.pop(0)
 
     output_label = "matrices/heatmaps" if fig_save_flag else "matrices"
     print(

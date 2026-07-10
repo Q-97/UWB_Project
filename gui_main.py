@@ -413,7 +413,7 @@ DEFAULT_ALGO_PARAMS = {
         # ---- 后处理 ----
         "smooth_kernel": [2, 4],        # 卷积平滑核大小 [rows, cols], 可调
         # ---- 可视化 ----
-        "heatmap_update_stride_combined": 8,
+        "heatmap_update_stride_combined": 4,
         "plot_xlim": 1.5,
         "plot_ylim_min": -2.5,
         "plot_ylim_max": -0.1,
@@ -5111,6 +5111,32 @@ class App:
             print(f"❌ 导出失败: {e}")
     def rec_start(self, p, d): return self.source.start_recording(p, d)
     def rec_stop(self): self.source.stop_recording()
+
+    def _ra_occ_stride_raw(self):
+        p = self.config.algo_params.get('RA-OCCUPANCY', {})
+        stride_combined = max(1, int(p.get('heatmap_update_stride_combined', 4)))
+        cir_comb = max(1, int(p.get('cir_combine_num', 1)))
+        return stride_combined * cir_comb
+
+    def _try_step_ra_occupancy(self):
+        if not self.data_manager.buffer_full:
+            return None
+
+        current_snapshot = self._ra_occ_snapshot_counter
+        if (
+            self._last_ra_occ_heatmap_snapshot is not None and
+            current_snapshot - self._last_ra_occ_heatmap_snapshot < self._ra_occ_stride_raw()
+        ):
+            return None
+
+        d = self.algo_processor.step_ra_occupancy()
+        if d:
+            self._last_ra_occ_heatmap_snapshot = current_snapshot
+            _, _, state = self.ra_occupancy_detector.process(d['energy'])
+            d['occupancy'] = state
+            d['state'] = state
+        return d
+
     def loop(self):
         if not self.running: return
         
@@ -5121,6 +5147,9 @@ class App:
         if new_frames:
             # 获取当前配置中的第一个天线对，作为一轮的起点标记
             first_pair = (self.config.udp_tx_list[0], self.config.udp_rx_list[0])
+            last_pair = (self.config.udp_tx_list[-1], self.config.udp_rx_list[-1])
+            m = self.config.current_algo
+            ra_occ_data = None
 
             for f in new_frames: 
                 tx, rx, _ = f
@@ -5138,10 +5167,13 @@ class App:
                     if (tx, rx) == first_pair:
                         self._ra_occ_snapshot_counter += 1
                     self.data_manager.process_frame(*f)
+                    if m == 'RA-OCCUPANCY' and (tx, rx) == last_pair:
+                        d_ra_occ = self._try_step_ra_occupancy()
+                        if d_ra_occ:
+                            ra_occ_data = d_ra_occ
             
             # 只有在新帧触发了缓冲区更新后，才执行算法
             if self.data_manager.buffer_full:
-                m = self.config.current_algo
                 d = None
                 
                 if m == 'PLOT':
@@ -5181,22 +5213,7 @@ class App:
                 elif m == 'RA-HEATMAP':
                     d = self.algo_processor.step_ra_heatmap_view()
                 elif m == 'RA-OCCUPANCY':
-                    p = self.config.algo_params['RA-OCCUPANCY']
-                    stride_combined = max(1, int(p.get('heatmap_update_stride_combined', 8)))
-                    cir_comb = max(1, int(p.get('cir_combine_num', 1)))
-                    stride_raw = stride_combined * cir_comb
-                    current_snapshot = self._ra_occ_snapshot_counter
-                    should_update = (
-                        self._last_ra_occ_heatmap_snapshot is None or
-                        current_snapshot - self._last_ra_occ_heatmap_snapshot >= stride_raw
-                    )
-                    if should_update:
-                        d = self.algo_processor.step_ra_occupancy()
-                        if d:
-                            self._last_ra_occ_heatmap_snapshot = current_snapshot
-                            _, _, state = self.ra_occupancy_detector.process(d['energy'])
-                            d['occupancy'] = state
-                            d['state'] = state
+                    d = ra_occ_data
                 elif m == 'ANGLE-SPECTRUM':
                     d = self.algo_processor.step_angle_spectrum_view()
                 elif m == 'AS-RAW':
