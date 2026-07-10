@@ -412,6 +412,8 @@ DEFAULT_ALGO_PARAMS = {
         "dist_per_tap": 0.1875,
         # ---- 后处理 ----
         "smooth_kernel": [2, 4],        # 卷积平滑核大小 [rows, cols], 可调
+        "oa_mean_threshold": 0.0,
+        "oa_model_path": "./model/epoch-25-val-f1-100.0-sp-100.0.tflite",
         # ---- 可视化 ----
         "heatmap_update_stride_combined": 4,
         "plot_xlim": 1.5,
@@ -1903,6 +1905,7 @@ class AlgorithmProcessor:
         H, ranges_m, angles_deg, _, _ = self._compute_ra_heatmap(params)
         if H is None:
             return None
+        H_mean = float(np.mean(H))
         # H = np.fliplr(H)
         # 背景减除: H_bg = H - mean(H²), clip to >=0
         H_sq_mean = np.sqrt(np.sum(np.square(H)) / (H.shape[0] * H.shape[1]))
@@ -1937,6 +1940,8 @@ class AlgorithmProcessor:
 
         return {
             'heatmap': H_cart,
+            'h_raw': H,
+            'h_mean': H_mean,
             'xs_cart': xs_cart,
             'ys_cart': ys_cart,
             'ranges_m': ranges_m,
@@ -3569,7 +3574,7 @@ class PlotPanel(tk.Frame):
             ax_occ = self.figure.add_subplot(gs[0, 1])
 
             # 左: Cartesian RA 热力图 + 座位椭圆
-            ax_hm.set_title("RA Occupancy Heatmap (Cartesian)")
+            # ax_hm.set_title("RA Occupancy Heatmap (Cartesian)")
             ax_hm.set_xlabel("X (m)")
             ax_hm.set_ylabel("Y (m)")
             ax_hm.grid(True, linestyle=':', alpha=0.5)
@@ -3579,6 +3584,19 @@ class PlotPanel(tk.Frame):
             self.plots['ra_occ_cbar'] = self.figure.colorbar(
                 self.plots['ra_occ_hm'], ax=ax_hm, fraction=0.046, pad=0.04)
             self.plots['ra_occ_cbar'].set_label('Power')
+            self.plots['ra_occ_h_mean_text'] = ax_hm.text(
+                0.02, 1.04, "H mean: --", transform=ax_hm.transAxes,
+                ha='left', va='center', fontsize=9, fontweight='bold',
+                clip_on=False)
+            self.plots['ra_occ_oa_button'] = patches.Rectangle(
+                (0.72, 1.015), 0.24, 0.065, transform=ax_hm.transAxes,
+                facecolor='green', edgecolor='#222222', linewidth=1.2,
+                clip_on=False, zorder=6)
+            ax_hm.add_patch(self.plots['ra_occ_oa_button'])
+            self.plots['ra_occ_oa_text'] = ax_hm.text(
+                0.84, 1.048, "OUT", transform=ax_hm.transAxes,
+                ha='center', va='center', fontsize=9, fontweight='bold',
+                color='white', clip_on=False, zorder=7)
 
             # 画座位椭圆 (Cartesian 坐标系, 复用 _draw_seating_ellipses)
             occ_params = params.copy()
@@ -3852,6 +3870,21 @@ class PlotPanel(tk.Frame):
                 vmin = vmax - 1.0
             self.plots['ra_occ_hm'].set_clim(vmin=vmin, vmax=vmax)
 
+            h_mean = float(data.get('h_mean', 0.0))
+            mean_th = float(data.get('oa_mean_threshold', p.get('oa_mean_threshold', 0.0)))
+            oa_label = data.get('oa_label', 0)
+            oa_score = data.get('oa_score', None)
+            oa_status = data.get('oa_status', 'out')
+            if 'ra_occ_h_mean_text' in self.plots:
+                score_text = "" if oa_score is None else f" | score={oa_score:.3f}"
+                self.plots['ra_occ_h_mean_text'].set_text(
+                    f"H mean={h_mean:.4f} | th={mean_th:.4f}{score_text}")
+            if 'ra_occ_oa_button' in self.plots:
+                color = 'red' if oa_label == 1 else 'green'
+                text = 'IN' if oa_label == 1 else ('EMPTY' if oa_status == 'empty' else 'OUT')
+                self.plots['ra_occ_oa_button'].set_facecolor(color)
+                self.plots['ra_occ_oa_text'].set_text(text)
+
             # 座位椭圆着色 (复用 _update_seat_colors)
             if occupancy:
                 self._update_seat_colors(occupancy)
@@ -3871,11 +3904,12 @@ class PlotPanel(tk.Frame):
                 else:
                     energy_parts.append(f"{seat_name}={e:.4f}")
                     max_main_e = max(max_main_e, e)
-            self.axes['main'].set_title(
-                f"RA Occupancy (Cartesian)\n"
-                f"max mainE={max_main_e:.4f} | "
-                f"Occ: [{'|'.join(occ_parts)}]\n"
-                f"E: [{'|'.join(energy_parts)}]")
+            # self.axes['main'].set_title(
+            #     f"RA Occupancy (Cartesian)\n"
+            #     # f"max mainE={max_main_e:.4f} | "
+            #     # f"Occ: [{'|'.join(occ_parts)}]\n"
+            #     # f"E: [{'|'.join(energy_parts)}]"
+            #     )
 
             # === 右: 田字格状态面板 (原地更新色块+文字, 不复绘) ===
             state = data.get('state', {})  # 0=empty, 1=child, 2=adult
@@ -4994,6 +5028,10 @@ class App:
         self.plot_panel.init_layout("PLOT", self.config.algo_params['PLOT'])
         self._ra_occ_snapshot_counter = 0
         self._last_ra_occ_heatmap_snapshot = None
+        self._ra_occ_h_buffer = deque(maxlen=4)
+        self._ra_occ_interpreter = None
+        self._ra_occ_model_path = None
+        self._ra_occ_model_failed = False
         self.pc_export_data = []  # 新增：用于存储点云导出数据的列表
         self.playback_queue = [] # 新增：存放待处理的文件路径队列
         self.playback_skip_state = False  # False 表示处理，True 表示跳过
@@ -5017,6 +5055,7 @@ class App:
         self.algo_processor.init_done = False 
         if mode == 'RA-OCCUPANCY':
             self._last_ra_occ_heatmap_snapshot = None
+            self._ra_occ_h_buffer.clear()
         print(f"参数已更新，算法 {mode} 将重新初始化...")
     def start(self):
         RadarProtocol.update_protocol(self.config.ft_len)
@@ -5037,6 +5076,7 @@ class App:
             if not self.source.start(): return
             self._ra_occ_snapshot_counter = 0
             self._last_ra_occ_heatmap_snapshot = None
+            self._ra_occ_h_buffer.clear()
             self.algo_processor.init_done = False; self.running = True; self.loop()
     
     def _start_next_file(self):
@@ -5063,6 +5103,7 @@ class App:
         self.ra_occupancy_detector = RAOccupancyDetector(occ_params)
         self._ra_occ_snapshot_counter = 0
         self._last_ra_occ_heatmap_snapshot = None
+        self._ra_occ_h_buffer.clear()
         # ------------------------------------
 
         print(f"开始处理 ({len(self.playback_queue)} 剩余): {os.path.basename(current_file)}")
@@ -5112,6 +5153,119 @@ class App:
     def rec_start(self, p, d): return self.source.start_recording(p, d)
     def rec_stop(self): self.source.stop_recording()
 
+    def _ra_occ_normalize_h(self, h, eps=1e-6):
+        mean = np.mean(h)
+        std = np.std(h)
+        if std <= eps:
+            return h
+        return (h - mean) / std
+
+    def _ra_occ_resolve_model_path(self, model_path):
+        if not model_path:
+            model_path = "./model/epoch-25-val-f1-100.0-sp-100.0.tflite"
+        if os.path.isabs(model_path):
+            return model_path
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.abspath(os.path.join(base_dir, model_path))
+
+    def _ra_occ_get_interpreter(self):
+        p = self.config.algo_params.get('RA-OCCUPANCY', {})
+        model_path = self._ra_occ_resolve_model_path(p.get('oa_model_path', ''))
+        if self._ra_occ_interpreter is not None and self._ra_occ_model_path == model_path:
+            return self._ra_occ_interpreter
+        if self._ra_occ_model_failed and self._ra_occ_model_path == model_path:
+            return None
+
+        self._ra_occ_model_path = model_path
+        self._ra_occ_interpreter = None
+        self._ra_occ_model_failed = False
+        try:
+            try:
+                import tensorflow as tf
+                interpreter = tf.lite.Interpreter(model_path=model_path)
+            except ImportError:
+                from tflite_runtime.interpreter import Interpreter
+                interpreter = Interpreter(model_path=model_path)
+            interpreter.allocate_tensors()
+            self._ra_occ_interpreter = interpreter
+            return interpreter
+        except Exception as e:
+            print(f"[RA-OCCUPANCY] model load failed: {e}")
+            self._ra_occ_model_failed = True
+            return None
+
+    def _ra_occ_run_model(self, sample):
+        interpreter = self._ra_occ_get_interpreter()
+        if interpreter is None:
+            return None, None
+
+        input_detail = interpreter.get_input_details()[0]
+        output_detail = interpreter.get_output_details()[0]
+        input_shape = tuple(1 if int(x) < 0 else int(x) for x in input_detail['shape'])
+        inp = sample.astype(np.float32)
+        if np.prod(input_shape) == inp.size:
+            inp = inp.reshape(input_shape)
+        elif np.prod(input_shape[1:]) == inp.size:
+            inp = inp.reshape((1,) + input_shape[1:])
+        else:
+            print(f"[RA-OCCUPANCY] model input shape mismatch: {input_shape}, sample={inp.shape}")
+            return None, None
+
+        input_dtype = input_detail['dtype']
+        if input_dtype != np.float32:
+            scale, zero_point = input_detail.get('quantization', (0.0, 0))
+            if scale:
+                inp = inp / scale + zero_point
+            inp = np.clip(np.round(inp), np.iinfo(input_dtype).min, np.iinfo(input_dtype).max).astype(input_dtype)
+
+        interpreter.set_tensor(input_detail['index'], inp)
+        interpreter.invoke()
+
+        out = interpreter.get_tensor(output_detail['index'])
+        if output_detail['dtype'] != np.float32:
+            scale, zero_point = output_detail.get('quantization', (0.0, 0))
+            if scale:
+                out = (out.astype(np.float32) - zero_point) * scale
+        out = np.asarray(out).reshape(-1)
+        if out.size >= 2:
+            label = int(np.argmax(out))
+            score = float(out[1])
+        elif out.size == 1:
+            score = float(out[0])
+            label = 1 if score >= 0.5 else 0
+        else:
+            return None, None
+        return label, score
+
+    def _update_ra_occ_oa_state(self, d):
+        p = self.config.algo_params.get('RA-OCCUPANCY', {})
+        h = d.get('h_raw')
+        h_mean = float(d.get('h_mean', 0.0))
+        mean_th = float(p.get('oa_mean_threshold', 0.0))
+        d['oa_mean_threshold'] = mean_th
+        d['oa_label'] = 0
+        d['oa_score'] = None
+        d['oa_status'] = 'empty'
+
+        if h is None or h_mean < mean_th:
+            self._ra_occ_h_buffer.clear()
+            return d
+
+        d['oa_status'] = 'out'
+        h_norm = self._ra_occ_normalize_h(h)
+        self._ra_occ_h_buffer.append(h_norm)
+        if len(self._ra_occ_h_buffer) < self._ra_occ_h_buffer.maxlen:
+            return d
+
+        stacked = np.stack(list(self._ra_occ_h_buffer), axis=0)
+        sample = np.transpose(stacked, (2, 1, 0))
+        label, score = self._ra_occ_run_model(sample)
+        if label is not None:
+            d['oa_label'] = label
+            d['oa_score'] = score
+            d['oa_status'] = 'in' if label == 1 else 'out'
+        return d
+
     def _ra_occ_stride_raw(self):
         p = self.config.algo_params.get('RA-OCCUPANCY', {})
         stride_combined = max(1, int(p.get('heatmap_update_stride_combined', 4)))
@@ -5135,6 +5289,7 @@ class App:
             _, _, state = self.ra_occupancy_detector.process(d['energy'])
             d['occupancy'] = state
             d['state'] = state
+            self._update_ra_occ_oa_state(d)
         return d
 
     def loop(self):
