@@ -1905,7 +1905,6 @@ class AlgorithmProcessor:
         H, ranges_m, angles_deg, _, _ = self._compute_ra_heatmap(params)
         if H is None:
             return None
-        H_mean = float(np.mean(H))
         # H = np.fliplr(H)
         # 背景减除: H_bg = H - mean(H²), clip to >=0
         H_sq_mean = np.sqrt(np.sum(np.square(H)) / (H.shape[0] * H.shape[1]))
@@ -1941,7 +1940,6 @@ class AlgorithmProcessor:
         return {
             'heatmap': H_cart,
             'h_raw': H,
-            'h_mean': H_mean,
             'xs_cart': xs_cart,
             'ys_cart': ys_cart,
             'ranges_m': ranges_m,
@@ -3866,7 +3864,7 @@ class PlotPanel(tk.Frame):
                 vmin = vmax - 1.0
             self.plots['ra_occ_hm'].set_clim(vmin=vmin, vmax=vmax)
 
-            h_mean = float(data.get('h_mean', 0.0))
+            h_max = float(data.get('h_max', 0.0))
             mean_th = float(data.get('oa_mean_threshold', p.get('oa_mean_threshold', 0.0)))
             oa_label = data.get('oa_label', 0)
             oa_score = data.get('oa_score', None)
@@ -3902,7 +3900,7 @@ class PlotPanel(tk.Frame):
                 f"max mainE={max_main_e:.4f} | "
                 f"Occ: [{'|'.join(occ_parts)}]\n"
                 f"E: [{'|'.join(energy_parts)}]\n"
-                f"H mean={h_mean:.4f} | th={mean_th:.4f}{score_text}",
+                f"H max={h_max:.4f} | th={mean_th:.4f}{score_text}",
                 fontsize=9,
                 loc='left')
 
@@ -5023,6 +5021,7 @@ class App:
         self.plot_panel.init_layout("PLOT", self.config.algo_params['PLOT'])
         self._ra_occ_snapshot_counter = 0
         self._last_ra_occ_heatmap_snapshot = None
+        self._ra_occ_h_raw_buffer = deque(maxlen=4)
         self._ra_occ_h_buffer = deque(maxlen=4)
         self._ra_occ_interpreter = None
         self._ra_occ_model_path = None
@@ -5050,6 +5049,7 @@ class App:
         self.algo_processor.init_done = False 
         if mode == 'RA-OCCUPANCY':
             self._last_ra_occ_heatmap_snapshot = None
+            self._ra_occ_h_raw_buffer.clear()
             self._ra_occ_h_buffer.clear()
         print(f"参数已更新，算法 {mode} 将重新初始化...")
     def start(self):
@@ -5071,6 +5071,7 @@ class App:
             if not self.source.start(): return
             self._ra_occ_snapshot_counter = 0
             self._last_ra_occ_heatmap_snapshot = None
+            self._ra_occ_h_raw_buffer.clear()
             self._ra_occ_h_buffer.clear()
             self.algo_processor.init_done = False; self.running = True; self.loop()
     
@@ -5098,6 +5099,7 @@ class App:
         self.ra_occupancy_detector = RAOccupancyDetector(occ_params)
         self._ra_occ_snapshot_counter = 0
         self._last_ra_occ_heatmap_snapshot = None
+        self._ra_occ_h_raw_buffer.clear()
         self._ra_occ_h_buffer.clear()
         # ------------------------------------
 
@@ -5235,25 +5237,35 @@ class App:
     def _update_ra_occ_oa_state(self, d):
         p = self.config.algo_params.get('RA-OCCUPANCY', {})
         h = d.get('h_raw')
-        h_mean = float(d.get('h_mean', 0.0))
         mean_th = float(p.get('oa_mean_threshold', 0.0))
         d['oa_mean_threshold'] = mean_th
         d['oa_label'] = 0
         d['oa_score'] = None
         d['oa_status'] = 'empty'
 
-        if h is None or h_mean < mean_th:
+        if h is None:
+            self._ra_occ_h_raw_buffer.clear()
             self._ra_occ_h_buffer.clear()
             return d
 
         d['oa_status'] = 'out'
+        self._ra_occ_h_raw_buffer.append(h)
         h_norm = self._ra_occ_normalize_h(h)
         self._ra_occ_h_buffer.append(h_norm)
         if len(self._ra_occ_h_buffer) < self._ra_occ_h_buffer.maxlen:
             return d
 
+        raw_stacked = np.stack(list(self._ra_occ_h_raw_buffer), axis=0)
         stacked = np.stack(list(self._ra_occ_h_buffer), axis=0)
         sample = np.transpose(stacked, (2, 1, 0))
+        # 能量阈值计算
+        h_max = float(np.max(raw_stacked))
+        d['h_max'] = h_max
+        if h_max < mean_th:
+            self._ra_occ_h_raw_buffer.clear()
+            self._ra_occ_h_buffer.clear()
+            return d
+
         label, score = self._ra_occ_run_model(sample)
         if label is not None:
             d['oa_label'] = label
