@@ -689,7 +689,10 @@
       "snapshots": 144,
       "cir_combine_num": 9,
       "leakage_offset": 5,
-      "range_bin_drop_front": 4,
+      "range_bin_keep_range": [
+        4,
+        15
+      ],
       "doppler_window": "chebyshev",
       "doppler_win_atten": 60,
       "doppler_dc_remove": true,

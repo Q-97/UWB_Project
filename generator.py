@@ -27,8 +27,8 @@ fig_save_flag = False
 # 每次滑动bin的数量
 HEATMAP_STRIDE_COMBINED = 4
 
-# 丢弃range bin的数量
-RANGE_BIN_DROP_FRONT = 4
+# 保留range bin范围，包含右端点；例如(5, 13)会丢弃0-4和14、15
+RANGE_BIN_KEEP_RANGE = (5, 13)
 
 # 放大和heatmap倍数
 IMAGE_SCALE = 10
@@ -38,7 +38,7 @@ MATRIX_PATH_COUNT = 4
 USE_CONFIG_SAVE = False
 
 # 结果保存位置
-OUTPUT_TAG = f"combined={HEATMAP_STRIDE_COMBINED}_drop={RANGE_BIN_DROP_FRONT}_path={MATRIX_PATH_COUNT}"
+OUTPUT_TAG = f"combined={HEATMAP_STRIDE_COMBINED}_range={RANGE_BIN_KEEP_RANGE[0]}-{RANGE_BIN_KEEP_RANGE[1]}_path={MATRIX_PATH_COUNT}"
 MATRIX_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_matrix_h_norm"
 IMAGE_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_heatmap"
 
@@ -61,7 +61,7 @@ DEFAULT_RA_OCCUPANCY_PARAMS = {
     "snapshots": 144,
     "cir_combine_num": 9,
     "leakage_offset": 5,
-    "range_bin_drop_front": RANGE_BIN_DROP_FRONT,
+    "range_bin_keep_range": list(RANGE_BIN_KEEP_RANGE),
     "doppler_window": "chebyshev",
     "doppler_win_atten": 60,
     "doppler_dc_remove": True,
@@ -220,9 +220,33 @@ def load_project_config(base_dir: Path):
         radar_cfg.update(saved.get("radar_config", {}))
         params.update(saved.get("algo_params", {}).get("RA-OCCUPANCY", {}))
 
-    params["range_bin_drop_front"] = RANGE_BIN_DROP_FRONT
+    params["range_bin_keep_range"] = list(RANGE_BIN_KEEP_RANGE)
+    params.pop("range_bin_drop_front", None)
     params["heatmap_update_stride_combined"] = HEATMAP_STRIDE_COMBINED
     return radar_cfg, params
+
+
+def apply_range_bin_selection(current_cube: np.ndarray, params: dict) -> np.ndarray:
+    keep_range = params.get("range_bin_keep_range")
+    if keep_range is not None:
+        if isinstance(keep_range, str):
+            keep_range = keep_range.strip().strip("()[]").replace("\uff0c", ",").split(",")
+        if len(keep_range) != 2:
+            raise ValueError("range_bin_keep_range must be [start, end]")
+        start_bin = int(keep_range[0])
+        end_bin = int(keep_range[1])
+        max_bin = current_cube.shape[2] - 1
+        start_bin = max(0, min(start_bin, max_bin))
+        end_bin = max(start_bin, min(end_bin, max_bin))
+        return current_cube[:, :, start_bin:end_bin + 1, :]
+
+    drop_front = int(params.get("range_bin_drop_front", 0) or 0)
+    if drop_front > 0:
+        drop_front = min(drop_front, max(0, current_cube.shape[2] - 1))
+        return current_cube[:, :, drop_front:, :]
+
+    leakage_offset = int(params.get("leakage_offset", 0))
+    return np.roll(current_cube, -leakage_offset, axis=2)
 
 
 def init_capon_steering(params: dict):
@@ -262,13 +286,7 @@ def compute_ra_heatmap(all_c: np.ndarray, params: dict, capon_angles: np.ndarray
             .mean(axis=4)
         )
 
-    drop_front = int(params.get("range_bin_drop_front", 0) or 0)
-    if drop_front > 0:
-        drop_front = min(drop_front, max(0, current_cube.shape[2] - 1))
-        current_cube = current_cube[:, :, drop_front:, :]
-    else:
-        leakage_offset = int(params.get("leakage_offset", 0))
-        current_cube = np.roll(current_cube, -leakage_offset, axis=2)
+    current_cube = apply_range_bin_selection(current_cube, params)
 
     cube_flat = current_cube.transpose(1, 0, 2, 3).reshape(
         8, current_cube.shape[2], current_cube.shape[3]
@@ -498,7 +516,7 @@ def main():
     print(f"Input folder: {data_dir}")
     print(f"Matrix output folder: {matrix_output_dir}")
     print(f"Image output folder: {image_output_dir if fig_save_flag else 'disabled'}")
-    print(f"range_bin_drop_front={RANGE_BIN_DROP_FRONT}")
+    print(f"range_bin_keep_range={RANGE_BIN_KEEP_RANGE}")
     print(f"heatmap_stride_combined={HEATMAP_STRIDE_COMBINED}")
 
     for bin_path in bin_files:

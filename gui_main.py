@@ -97,12 +97,36 @@ def load_config(config):
             else:
                 config.algo_params[algo_name] = params
         # 确保天线布局与 current_layout_name 一致
+        if 'RA-OCCUPANCY' in config.algo_params and 'range_bin_keep_range' in config.algo_params['RA-OCCUPANCY']:
+            config.algo_params['RA-OCCUPANCY'].pop('range_bin_drop_front', None)
         config.load_layout(config.current_layout_name)
         print(f"[Config] 配置已从 {CONFIG_FILE} 加载")
         return True
     except Exception as e:
         print(f"[Config] 加载配置失败: {e}")
         return False
+
+def apply_range_bin_selection(current_cube, params):
+    keep_range = params.get('range_bin_keep_range')
+    if keep_range is not None:
+        if isinstance(keep_range, str):
+            keep_range = keep_range.strip().strip('()[]').replace('\uff0c', ',').split(',')
+        if len(keep_range) != 2:
+            raise ValueError("range_bin_keep_range must be [start, end]")
+        start_bin = int(keep_range[0])
+        end_bin = int(keep_range[1])
+        max_bin = current_cube.shape[2] - 1
+        start_bin = max(0, min(start_bin, max_bin))
+        end_bin = max(start_bin, min(end_bin, max_bin))
+        return current_cube[:, :, start_bin:end_bin + 1, :]
+
+    drop_front = int(params.get('range_bin_drop_front', 0) or 0)
+    if drop_front > 0:
+        drop_front = min(drop_front, max(0, current_cube.shape[2] - 1))
+        return current_cube[:, :, drop_front:, :]
+
+    leakage_offset = int(params.get('leakage_offset', 0))
+    return np.roll(current_cube, -leakage_offset, axis=2)
 
 # ==============================================================================
 # 1. Presets & Defaults
@@ -398,7 +422,7 @@ DEFAULT_ALGO_PARAMS = {
         "snapshots": 64,
         "cir_combine_num": 1,
         "leakage_offset": 5,
-        "range_bin_drop_front": 5,
+        "range_bin_keep_range": [5, 13],
         "doppler_window": "chebyshev",
         "doppler_win_atten": 60,
         "doppler_dc_remove": True,
@@ -2608,12 +2632,7 @@ class AlgorithmProcessor:
             trim = n_comb * cir_comb
             current_cube = current_cube[:, :, :16, :trim] \
                 .reshape(4, 2, 16, n_comb, cir_comb).mean(axis=4)
-        drop_front = int(params.get('range_bin_drop_front', 0) or 0)
-        if drop_front > 0:
-            drop_front = min(drop_front, max(0, current_cube.shape[2] - 1))
-            current_cube = current_cube[:, :, drop_front:, :]
-        else:
-            current_cube = np.roll(current_cube, -leakage_offset, axis=2)
+        current_cube = apply_range_bin_selection(current_cube, params)
 
         # 展平 8 通道 → 选 4 通道
         # current_cube: (4 RX, 2 TX, 32 range, L chirps)
@@ -3473,8 +3492,11 @@ class AlgoSettingsDialog(tk.Toplevel):
                     new_params[key] = bool(val)
                 elif isinstance(orig_val, list): 
                     # 更好地处理列表输入，支持 [0,1] 或 0,1 格式
-                    s = val.strip()
-                    if not s.startswith('['): s = '[' + s + ']'
+                    s = val.strip().replace('\uff0c', ',')
+                    if s.startswith('(') and s.endswith(')'):
+                        s = '[' + s[1:-1] + ']'
+                    elif not s.startswith('['):
+                        s = '[' + s + ']'
                     new_params[key] = json.loads(s)
                 elif isinstance(orig_val, int): 
                     new_params[key] = int(val)
