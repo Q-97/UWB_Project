@@ -3584,17 +3584,13 @@ class PlotPanel(tk.Frame):
             self.plots['ra_occ_cbar'] = self.figure.colorbar(
                 self.plots['ra_occ_hm'], ax=ax_hm, fraction=0.046, pad=0.04)
             self.plots['ra_occ_cbar'].set_label('Power')
-            self.plots['ra_occ_h_mean_text'] = ax_hm.text(
-                0.02, 1.04, "H mean: --", transform=ax_hm.transAxes,
-                ha='left', va='center', fontsize=9, fontweight='bold',
-                clip_on=False)
             self.plots['ra_occ_oa_button'] = patches.Rectangle(
-                (0.72, 1.015), 0.24, 0.065, transform=ax_hm.transAxes,
+                (0.72, 1.21), 0.24, 0.065, transform=ax_hm.transAxes,
                 facecolor='green', edgecolor='#222222', linewidth=1.2,
                 clip_on=False, zorder=6)
             ax_hm.add_patch(self.plots['ra_occ_oa_button'])
             self.plots['ra_occ_oa_text'] = ax_hm.text(
-                0.84, 1.048, "OUT", transform=ax_hm.transAxes,
+                0.84, 1.243, "OUT", transform=ax_hm.transAxes,
                 ha='center', va='center', fontsize=9, fontweight='bold',
                 color='white', clip_on=False, zorder=7)
 
@@ -3875,10 +3871,7 @@ class PlotPanel(tk.Frame):
             oa_label = data.get('oa_label', 0)
             oa_score = data.get('oa_score', None)
             oa_status = data.get('oa_status', 'out')
-            if 'ra_occ_h_mean_text' in self.plots:
-                score_text = "" if oa_score is None else f" | score={oa_score:.3f}"
-                self.plots['ra_occ_h_mean_text'].set_text(
-                    f"H mean={h_mean:.4f} | th={mean_th:.4f}{score_text}")
+            score_text = "" if oa_score is None else f" | score={oa_score:.3f}"
             if 'ra_occ_oa_button' in self.plots:
                 color = 'red' if oa_label == 1 else 'green'
                 text = 'IN' if oa_label == 1 else ('EMPTY' if oa_status == 'empty' else 'OUT')
@@ -3904,12 +3897,14 @@ class PlotPanel(tk.Frame):
                 else:
                     energy_parts.append(f"{seat_name}={e:.4f}")
                     max_main_e = max(max_main_e, e)
-            # self.axes['main'].set_title(
-            #     f"RA Occupancy (Cartesian)\n"
-            #     # f"max mainE={max_main_e:.4f} | "
-            #     # f"Occ: [{'|'.join(occ_parts)}]\n"
-            #     # f"E: [{'|'.join(energy_parts)}]"
-            #     )
+            self.axes['main'].set_title(
+                f"RA Occupancy (Cartesian)\n"
+                f"max mainE={max_main_e:.4f} | "
+                f"Occ: [{'|'.join(occ_parts)}]\n"
+                f"E: [{'|'.join(energy_parts)}]\n"
+                f"H mean={h_mean:.4f} | th={mean_th:.4f}{score_text}",
+                fontsize=9,
+                loc='left')
 
             # === 右: 田字格状态面板 (原地更新色块+文字, 不复绘) ===
             state = data.get('state', {})  # 0=empty, 1=child, 2=adult
