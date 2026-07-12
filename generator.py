@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 # =========================
 
 # 数据位置
-DATA_DIR_NAME = "data"
+DATA_DIR_NAME = "data_ori"
 
 # 保存图片标志位
 fig_save_flag = False
@@ -27,8 +27,8 @@ fig_save_flag = False
 # 每次滑动bin的数量
 HEATMAP_STRIDE_COMBINED = 4
 
-# 保留range bin范围，包含右端点；例如(5, 13)会丢弃0-4和14、15
-RANGE_BIN_KEEP_RANGE = (5, 13)
+# 保留range bin范围，包含右端点；例如(5, 14)会丢弃0-4和15
+RANGE_BIN_KEEP_RANGE = (5, 14)
 
 # 放大和heatmap倍数
 IMAGE_SCALE = 10
@@ -39,6 +39,7 @@ USE_CONFIG_SAVE = False
 
 # 结果保存位置
 OUTPUT_TAG = f"combined={HEATMAP_STRIDE_COMBINED}_range={RANGE_BIN_KEEP_RANGE[0]}-{RANGE_BIN_KEEP_RANGE[1]}_path={MATRIX_PATH_COUNT}"
+OUTPUT_ROOT_DIR_NAME = "data_in"
 MATRIX_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_matrix_h_norm"
 IMAGE_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_heatmap"
 
@@ -501,8 +502,9 @@ def process_bin_file(
 def main():
     base_dir = Path(__file__).resolve().parent
     data_dir = base_dir / DATA_DIR_NAME
-    matrix_output_dir = base_dir / MATRIX_OUTPUT_DIR_NAME
-    image_output_dir = base_dir / IMAGE_OUTPUT_DIR_NAME
+    output_root_dir = base_dir / OUTPUT_ROOT_DIR_NAME
+    matrix_output_dir = output_root_dir / MATRIX_OUTPUT_DIR_NAME
+    image_output_dir = output_root_dir / IMAGE_OUTPUT_DIR_NAME
     matrix_output_dir.mkdir(parents=True, exist_ok=True)
     if fig_save_flag:
         image_output_dir.mkdir(parents=True, exist_ok=True)

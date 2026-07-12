@@ -570,7 +570,7 @@ class RadarConfig:
     num_rx_antennas: int = 4
     rx_antenna_start_num: int = 4
     
-    connection_mode: str = "UDP"  # "UDP", "SERIAL", "CAN", "PLAYBACK"
+    connection_mode: str = "UDP"  # "UDP", "BD", "SERIAL", "CAN", "PLAYBACK"
     serial_port: str = "COM6"
     baud_rate: int = 460800
     udp_ip: str = "127.0.0.1"
@@ -3302,7 +3302,7 @@ class LiveRadarSource:
         self.rec_start_time = 0; self.rec_duration_target = 0; self.measured_fps = 0.0; self.last_fps_time = time.time(); self.frame_count_sec = 0
     def start(self):
         self.running = True; RadarProtocol.update_protocol(self.config.ft_len)
-        if self.config.connection_mode == 'UDP':
+        if self.config.connection_mode in ('UDP', 'BD'):
             self.udp_server = UDPFrameServer(ConfigAdapter(self.config)); self.udp_server.start()
         elif self.config.connection_mode == 'CAN':
 
@@ -3347,7 +3347,7 @@ class LiveRadarSource:
             if now - self.last_fps_time >= 1.0: self.measured_fps = self.frame_count_sec / (now - self.last_fps_time); self.frame_count_sec = 0; self.last_fps_time = now
             raw_chunk = b''
             try:
-                if self.config.connection_mode == 'UDP': f = self.udp_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
+                if self.config.connection_mode in ('UDP', 'BD'): f = self.udp_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
                 elif self.config.connection_mode == 'CAN': f = self.can_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
                 elif self.config.connection_mode == 'SERIAL': raw_chunk = ser.read(ser.in_waiting) if ser.in_waiting else b''; time.sleep(0.002) if not raw_chunk else None
             except: pass
@@ -4427,7 +4427,7 @@ class ControlPanel(tk.Frame):
         frm_mode = tk.Frame(self, bg='#f0f0f0')
         frm_mode.pack(fill='x', padx=5, pady=5)
         self.mode_var = tk.StringVar(value=config.connection_mode)
-        ttk.Combobox(frm_mode, textvariable=self.mode_var, values=('UDP', 'SERIAL', 'CAN', 'PLAYBACK'), state='readonly').pack(fill='x')
+        ttk.Combobox(frm_mode, textvariable=self.mode_var, values=('UDP', 'BD', 'SERIAL', 'CAN', 'PLAYBACK'), state='readonly').pack(fill='x')
         self.mode_var.trace_add('write', self._on_mode_change)
 
         # --- 基础配置区域 (折叠或简化显示) ---
@@ -5048,6 +5048,7 @@ class App:
         self._ra_occ_interpreter = None
         self._ra_occ_model_path = None
         self._ra_occ_model_failed = False
+        self._bd_sample_save_index = 0
         self.pc_export_data = []  # 新增：用于存储点云导出数据的列表
         self.playback_queue = [] # 新增：存放待处理的文件路径队列
         self.playback_skip_state = False  # False 表示处理，True 表示跳过
@@ -5095,6 +5096,7 @@ class App:
             self._last_ra_occ_heatmap_snapshot = None
             self._ra_occ_h_raw_buffer.clear()
             self._ra_occ_h_buffer.clear()
+            self._bd_sample_save_index = 0
             self.algo_processor.init_done = False; self.running = True; self.loop()
     
     def _start_next_file(self):
@@ -5171,6 +5173,51 @@ class App:
             print(f"❌ 导出失败: {e}")
     def rec_start(self, p, d): return self.source.start_recording(p, d)
     def rec_stop(self): self.source.stop_recording()
+
+    def _save_matrix_sample_txt(self, matrix, path):
+        matrix = np.asarray(matrix)
+        with open(path, "w", encoding="utf-8") as f:
+            for idx in range(matrix.shape[0]):
+                np.savetxt(f, matrix[idx], fmt="%.10e")
+
+    def _bd_sample_folder_name(self, sample):
+        p = self.config.algo_params.get('RA-OCCUPANCY', {})
+        stride = max(1, int(p.get('heatmap_update_stride_combined', 4)))
+        path_count = int(np.asarray(sample).shape[2]) if np.asarray(sample).ndim >= 3 else 0
+        azimuth_num = int(p.get('azimuth_num', np.asarray(sample).shape[0] if np.asarray(sample).ndim >= 1 else 0))
+        keep_range = p.get('range_bin_keep_range')
+        if keep_range is not None and len(keep_range) == 2:
+            range_part = f"{int(keep_range[0])}-{int(keep_range[1])}"
+        else:
+            range_part = f"bins={np.asarray(sample).shape[1] if np.asarray(sample).ndim >= 2 else 0}"
+        return f"combined={stride}_range={range_part}_path={path_count}_azimuth={azimuth_num}"
+
+    def _save_bd_positive_sample(self, sample, score=None):
+        try:
+            save_root = self.config.data_save_dir or "./data"
+            save_dir = os.path.join(save_root, "bd", self._bd_sample_folder_name(sample))
+            os.makedirs(save_dir, exist_ok=True)
+
+            existing_next = 0
+            for name in os.listdir(save_dir):
+                if name.startswith("out_bd_") and name.endswith(".txt"):
+                    cnt_text = name[len("out_bd_"):-len(".txt")]
+                    if cnt_text.isdigit():
+                        existing_next = max(existing_next, int(cnt_text) + 1)
+
+            cnt = max(self._bd_sample_save_index, existing_next)
+            filename = f"out_bd_{cnt}.txt"
+            path = os.path.join(save_dir, filename)
+            while os.path.exists(path):
+                cnt += 1
+                filename = f"out_bd_{cnt}.txt"
+                path = os.path.join(save_dir, filename)
+
+            self._save_matrix_sample_txt(sample, path)
+            self._bd_sample_save_index = cnt + 1
+            print(f"[BD] saved positive sample: {path}")
+        except Exception as e:
+            print(f"[BD] save positive sample failed: {e}")
 
     def _ra_occ_normalize_h(self, h, eps=1e-6):
         mean = np.mean(h)
@@ -5293,6 +5340,10 @@ class App:
             d['oa_label'] = label
             d['oa_score'] = score
             d['oa_status'] = 'in' if label == 1 else 'out'
+            if self.config.connection_mode == 'BD':
+                print(f"[BD] model prediction: label={label}, score={score:.4f}")
+                if label == 1:
+                    self._save_bd_positive_sample(sample, score)
         return d
 
     def _ra_occ_stride_raw(self):

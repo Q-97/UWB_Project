@@ -29,7 +29,7 @@
     "data_save_dir": "D:/cpd_data/data_in_adult",
     "record_filename": "out_a3_1.bin",
     "record_duration": 720.0,
-    "playback_duration": 30.0,
+    "playback_duration": 720.0,
     "export_pc_json": false,
     "recent_save_dirs": [
       "D:/cpd_data",
@@ -690,8 +690,8 @@
       "cir_combine_num": 9,
       "leakage_offset": 5,
       "range_bin_keep_range": [
-        4,
-        15
+        5,
+        14
       ],
       "doppler_window": "chebyshev",
       "doppler_win_atten": 60,
@@ -731,7 +731,7 @@
         4
       ],
       "oa_mean_threshold": 0.05,
-      "oa_model_path": "./model/epoch-25-val-f1-100.0-sp-100.0.tflite",
+      "oa_model_path": "./model/epoch-50-val-f1-100.0-sp-100.0.tflite",
       "heatmap_update_stride_combined": 4,
       "plot_xlim": 1.5,
       "plot_ylim_min": -2.5,
