@@ -28,7 +28,7 @@ fig_save_flag = False
 HEATMAP_STRIDE_COMBINED = 4
 
 # 保留range bin范围，包含右端点；例如(5, 14)会丢弃0-4和15
-RANGE_BIN_KEEP_RANGE = (5, 14)
+RANGE_BIN_KEEP_RANGE = (5, 16)
 
 # 放大和heatmap倍数
 IMAGE_SCALE = 10
@@ -82,7 +82,7 @@ DEFAULT_RA_OCCUPANCY_PARAMS = {
         0.5787126081848506,
     ],
     "capon_diag_load": 1e-3,
-    "dist_per_tap": 0.1875,
+    "dist_per_tap": 0.15,
     "smooth_kernel": [2, 4],
     "heatmap_update_stride_combined": HEATMAP_STRIDE_COMBINED,
     "plot_xlim": 1.5,
@@ -282,8 +282,8 @@ def compute_ra_heatmap(all_c: np.ndarray, params: dict, capon_angles: np.ndarray
             return None
         trim = n_comb * cir_comb
         current_cube = (
-            current_cube[:, :, :16, :trim]
-            .reshape(4, 2, 16, n_comb, cir_comb)
+            current_cube[:, :, :32, :trim]
+            .reshape(4, 2, 32, n_comb, cir_comb)
             .mean(axis=4)
         )
 

@@ -1964,6 +1964,7 @@ class AlgorithmProcessor:
         return {
             'heatmap': H_cart,
             'h_raw': H,
+            'h_bg': H_bg,
             'xs_cart': xs_cart,
             'ys_cart': ys_cart,
             'ranges_m': ranges_m,
@@ -2630,8 +2631,8 @@ class AlgorithmProcessor:
         if cir_comb > 1:
             n_comb = current_cube.shape[3] // cir_comb
             trim = n_comb * cir_comb
-            current_cube = current_cube[:, :, :16, :trim] \
-                .reshape(4, 2, 16, n_comb, cir_comb).mean(axis=4)
+            current_cube = current_cube[:, :, :32, :trim] \
+                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
         current_cube = apply_range_bin_selection(current_cube, params)
 
         # 展平 8 通道 → 选 4 通道
@@ -5043,7 +5044,7 @@ class App:
         self.plot_panel.init_layout("PLOT", self.config.algo_params['PLOT'])
         self._ra_occ_snapshot_counter = 0
         self._last_ra_occ_heatmap_snapshot = None
-        self._ra_occ_h_raw_buffer = deque(maxlen=4)
+        self._ra_occ_h_bg_buffer = deque(maxlen=4)
         self._ra_occ_h_buffer = deque(maxlen=4)
         self._ra_occ_interpreter = None
         self._ra_occ_model_path = None
@@ -5072,7 +5073,7 @@ class App:
         self.algo_processor.init_done = False 
         if mode == 'RA-OCCUPANCY':
             self._last_ra_occ_heatmap_snapshot = None
-            self._ra_occ_h_raw_buffer.clear()
+            self._ra_occ_h_bg_buffer.clear()
             self._ra_occ_h_buffer.clear()
         print(f"参数已更新，算法 {mode} 将重新初始化...")
     def start(self):
@@ -5094,7 +5095,7 @@ class App:
             if not self.source.start(): return
             self._ra_occ_snapshot_counter = 0
             self._last_ra_occ_heatmap_snapshot = None
-            self._ra_occ_h_raw_buffer.clear()
+            self._ra_occ_h_bg_buffer.clear()
             self._ra_occ_h_buffer.clear()
             self._bd_sample_save_index = 0
             self.algo_processor.init_done = False; self.running = True; self.loop()
@@ -5123,7 +5124,7 @@ class App:
         self.ra_occupancy_detector = RAOccupancyDetector(occ_params)
         self._ra_occ_snapshot_counter = 0
         self._last_ra_occ_heatmap_snapshot = None
-        self._ra_occ_h_raw_buffer.clear()
+        self._ra_occ_h_bg_buffer.clear()
         self._ra_occ_h_buffer.clear()
         # ------------------------------------
 
@@ -5306,33 +5307,33 @@ class App:
     def _update_ra_occ_oa_state(self, d):
         p = self.config.algo_params.get('RA-OCCUPANCY', {})
         h = d.get('h_raw')
+        h_bg = d.get('h_bg')
         mean_th = float(p.get('oa_mean_threshold', 0.0))
         d['oa_mean_threshold'] = mean_th
         d['oa_label'] = 0
         d['oa_score'] = None
         d['oa_status'] = 'empty'
 
-        if h is None:
-            self._ra_occ_h_raw_buffer.clear()
+        if h is None or h_bg is None:
+            self._ra_occ_h_bg_buffer.clear()
             self._ra_occ_h_buffer.clear()
             return d
 
         d['oa_status'] = 'out'
-        self._ra_occ_h_raw_buffer.append(h)
+        self._ra_occ_h_bg_buffer.append(h_bg)
         h_norm = self._ra_occ_normalize_h(h)
         self._ra_occ_h_buffer.append(h_norm)
         if len(self._ra_occ_h_buffer) < self._ra_occ_h_buffer.maxlen:
             return d
 
-        raw_stacked = np.stack(list(self._ra_occ_h_raw_buffer), axis=0)
+        bg_stacked = np.stack(list(self._ra_occ_h_bg_buffer), axis=0)
         stacked = np.stack(list(self._ra_occ_h_buffer), axis=0)
         sample = np.transpose(stacked, (2, 1, 0))
         # 能量阈值计算
-        h_max = float(np.max(raw_stacked))
+        h_max = float(np.max(bg_stacked))
         d['h_max'] = h_max
         if h_max < mean_th:
-            self._ra_occ_h_raw_buffer.clear()
-            self._ra_occ_h_buffer.clear()
+
             return d
 
         label, score = self._ra_occ_run_model(sample)

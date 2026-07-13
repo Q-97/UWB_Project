@@ -26,10 +26,10 @@
     "current_algo": "RA-OCCUPANCY",
     "snapshot_rate": 20,
     "tap_interval_si": 1e-09,
-    "data_save_dir": "D:/cpd_data/data_in_adult",
-    "record_filename": "out_a3_1.bin",
-    "record_duration": 720.0,
-    "playback_duration": 720.0,
+    "data_save_dir": "./data",
+    "record_filename": "in_bebug_d4_s1_2.bin",
+    "record_duration": 60.0,
+    "playback_duration": 30.0,
     "export_pc_json": false,
     "recent_save_dirs": [
       "D:/cpd_data",
@@ -691,7 +691,7 @@
       "leakage_offset": 5,
       "range_bin_keep_range": [
         5,
-        14
+        16
       ],
       "doppler_window": "chebyshev",
       "doppler_win_atten": 60,
@@ -712,7 +712,7 @@
         -60,
         60
       ],
-      "azimuth_num": 32,
+      "azimuth_num": 24,
       "ant_calib_en": true,
       "ant_calib_phase": [
         -0.0,
@@ -731,7 +731,7 @@
         4
       ],
       "oa_mean_threshold": 0.05,
-      "oa_model_path": "./model/epoch-50-val-f1-100.0-sp-100.0.tflite",
+      "oa_model_path": "./model/epoch-30-val-f1-100.0-sp-100.0.tflite",
       "heatmap_update_stride_combined": 4,
       "plot_xlim": 1.5,
       "plot_ylim_min": -2.5,
