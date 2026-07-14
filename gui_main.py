@@ -690,7 +690,7 @@ class RadarDataManager:
         self.buffer_full = False
 
     def process_frame(self, tx, rx, raw):
-        if (tx, rx) not in self.snapshots_data: return
+        if (tx, rx) not in self.snapshots_data: return None
         self.snapshots_data[(tx, rx)]['raw'].append(raw)
         self.bgs[(tx, rx)].M = self.config.bg_m_factor
         
@@ -707,8 +707,10 @@ class RadarDataManager:
         # 4. 去背景后的幅值送入 'abs'
         self.snapshots_data[(tx, rx)]['abs'].append(r_abs_no_bg)
         
-        if self.snapshots_data[self.pairs[0]]['complex'].is_full(): 
+        if self.snapshots_data[self.pairs[0]]['complex'].is_full():
             self.buffer_full = True
+
+        return r_no_bg, r_abs_no_bg
 
     def get_all_snapshot_as_array(self, type='complex'):
         if not self.buffer_full: return None
@@ -3355,11 +3357,13 @@ class LiveRadarSource:
             if not raw_chunk: continue
             if self.is_recording and self.record_file: self.record_file.write(raw_chunk)
             parsed = RadarProtocol.parse_frame(raw_chunk)
-            if parsed: self.frame_count_sec += 1; self.data_queue.put(parsed) if not self.data_queue.full() else None
+            if parsed:
+                raw_frame = bytes(raw_chunk)
+                self.frame_count_sec += 1; self.data_queue.put(parsed + (raw_frame,)) if not self.data_queue.full() else None
         if ser: ser.close()
     def get_batch_frames(self):
-        frames = []; 
-        try: 
+        frames = [];
+        try:
             while True: frames.append(self.data_queue.get_nowait())
         except queue.Empty: pass
         return frames
@@ -3425,7 +3429,7 @@ class FilePlaybackSource:
                 parsed = RadarProtocol.parse_frame(chunk)
                 if parsed:
                     if not self.data_queue.full():
-                        self.data_queue.put(parsed)
+                        self.data_queue.put(parsed + (bytes(chunk),))
                 
                 # 精确控制播放速度
                 dt = time.time() - t0
@@ -5046,10 +5050,11 @@ class App:
         self._last_ra_occ_heatmap_snapshot = None
         self._ra_occ_h_bg_buffer = deque(maxlen=4)
         self._ra_occ_h_buffer = deque(maxlen=4)
+        self._ra_occ_raw_window_buffer = deque(maxlen=4)
+        self._bd_bg_removed_snapshot_buffer = deque(maxlen=3000)
         self._ra_occ_interpreter = None
         self._ra_occ_model_path = None
         self._ra_occ_model_failed = False
-        self._bd_sample_save_index = 0
         self.pc_export_data = []  # 新增：用于存储点云导出数据的列表
         self.playback_queue = [] # 新增：存放待处理的文件路径队列
         self.playback_skip_state = False  # False 表示处理，True 表示跳过
@@ -5075,6 +5080,8 @@ class App:
             self._last_ra_occ_heatmap_snapshot = None
             self._ra_occ_h_bg_buffer.clear()
             self._ra_occ_h_buffer.clear()
+            self._ra_occ_raw_window_buffer.clear()
+            self._bd_bg_removed_snapshot_buffer.clear()
         print(f"参数已更新，算法 {mode} 将重新初始化...")
     def start(self):
         RadarProtocol.update_protocol(self.config.ft_len)
@@ -5097,7 +5104,8 @@ class App:
             self._last_ra_occ_heatmap_snapshot = None
             self._ra_occ_h_bg_buffer.clear()
             self._ra_occ_h_buffer.clear()
-            self._bd_sample_save_index = 0
+            self._ra_occ_raw_window_buffer.clear()
+            self._bd_bg_removed_snapshot_buffer.clear()
             self.algo_processor.init_done = False; self.running = True; self.loop()
     
     def _start_next_file(self):
@@ -5126,6 +5134,8 @@ class App:
         self._last_ra_occ_heatmap_snapshot = None
         self._ra_occ_h_bg_buffer.clear()
         self._ra_occ_h_buffer.clear()
+        self._ra_occ_raw_window_buffer.clear()
+        self._bd_bg_removed_snapshot_buffer.clear()
         # ------------------------------------
 
         print(f"开始处理 ({len(self.playback_queue)} 剩余): {os.path.basename(current_file)}")
@@ -5193,29 +5203,99 @@ class App:
             range_part = f"bins={np.asarray(sample).shape[1] if np.asarray(sample).ndim >= 2 else 0}"
         return f"combined={stride}_range={range_part}_path={path_count}_azimuth={azimuth_num}"
 
+    def _bd_pack_background_removed_frame(self, raw_frame, cir_no_bg):
+        if raw_frame is None or cir_no_bg is None:
+            return None
+        if len(raw_frame) != RadarProtocol.FRAME_LEN:
+            return None
+
+        cir_no_bg = np.asarray(cir_no_bg)
+        if cir_no_bg.size != RadarProtocol.FT_LEN:
+            return None
+
+        iq = np.empty(cir_no_bg.size * 2, dtype=np.int16)
+        iq[0::2] = np.clip(np.rint(cir_no_bg.real), -32768, 32767).astype(np.int16)
+        iq[1::2] = np.clip(np.rint(cir_no_bg.imag), -32768, 32767).astype(np.int16)
+        payload_start = RadarProtocol.HEADER_LEN + RadarProtocol.ANTENNA_INFO_LEN
+        payload_end = payload_start + RadarProtocol.CIR_DATA_LEN
+        return raw_frame[:payload_start] + iq.tobytes() + raw_frame[payload_end:]
+
+    def _bd_remember_bg_removed_frame(self, snapshot_idx, tx, rx, raw_frame, cir_no_bg):
+        bg_removed_frame = self._bd_pack_background_removed_frame(raw_frame, cir_no_bg)
+        if bg_removed_frame is None or snapshot_idx <= 0:
+            return
+        if not self._bd_bg_removed_snapshot_buffer or self._bd_bg_removed_snapshot_buffer[-1]['idx'] != snapshot_idx:
+            self._bd_bg_removed_snapshot_buffer.append({'idx': snapshot_idx, 'frames': []})
+        self._bd_bg_removed_snapshot_buffer[-1]['frames'].append(bg_removed_frame)
+
+    def _remember_ra_occ_raw_window(self):
+        p = self.config.algo_params.get('RA-OCCUPANCY', {})
+        snapshot_end = self._last_ra_occ_heatmap_snapshot
+        if snapshot_end is None:
+            return
+        snapshots = max(1, int(p.get('snapshots', self.config.max_snapshots)))
+        snapshot_start = max(1, snapshot_end - snapshots + 1)
+        self._ra_occ_raw_window_buffer.append((snapshot_start, snapshot_end))
+
+    def _bd_bg_removed_frames_for_current_sample(self):
+        if not self._ra_occ_raw_window_buffer:
+            return [], None, None
+
+        snapshot_start = min(win[0] for win in self._ra_occ_raw_window_buffer)
+        snapshot_end = max(win[1] for win in self._ra_occ_raw_window_buffer)
+        frames = []
+        for item in self._bd_bg_removed_snapshot_buffer:
+            idx = item['idx']
+            if snapshot_start <= idx <= snapshot_end:
+                frames.extend(item['frames'])
+        return frames, snapshot_start, snapshot_end
+
+    def _save_bd_bg_removed_signal_bin(self, path, sample, score=None):
+        frames, snapshot_start, snapshot_end = self._bd_bg_removed_frames_for_current_sample()
+        if not frames:
+            print("[BD] background-removed signal save skipped: snapshot history is empty")
+            return 0
+
+        with open(path, "wb") as f:
+            for frame in frames:
+                f.write(frame)
+
+        meta = asdict(self.config)
+        meta.update({
+            "recorded_date": str(datetime.now()),
+            "bd_event_score": score,
+            "bd_background_removed_frame_count": len(frames),
+            "bd_snapshot_start": snapshot_start,
+            "bd_snapshot_end": snapshot_end,
+            "bd_source": "background_removed_snapshot_window",
+            "bd_payload": "remove_background_complex_int16_iq",
+        })
+        try:
+            with open(path + ".meta", "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=4, cls=NpEncoder, ensure_ascii=False)
+        except Exception as e:
+            print(f"[BD] background-removed signal meta save failed: {e}")
+
+        print(f"[BD] saved background-removed signal: {path} ({len(frames)} frames)")
+        return len(frames)
+
     def _save_bd_positive_sample(self, sample, score=None):
         try:
             save_root = self.config.data_save_dir or "./data"
-            save_dir = os.path.join(save_root, "bd", self._bd_sample_folder_name(sample))
+            folder_name = self._bd_sample_folder_name(sample)
+            save_dir = os.path.join(save_root, "bd", folder_name)
+            raw_save_dir = os.path.join(save_root, "bd_ori", folder_name)
             os.makedirs(save_dir, exist_ok=True)
+            os.makedirs(raw_save_dir, exist_ok=True)
 
-            existing_next = 0
-            for name in os.listdir(save_dir):
-                if name.startswith("out_bd_") and name.endswith(".txt"):
-                    cnt_text = name[len("out_bd_"):-len(".txt")]
-                    if cnt_text.isdigit():
-                        existing_next = max(existing_next, int(cnt_text) + 1)
-
-            cnt = max(self._bd_sample_save_index, existing_next)
-            filename = f"out_bd_{cnt}.txt"
-            path = os.path.join(save_dir, filename)
-            while os.path.exists(path):
-                cnt += 1
-                filename = f"out_bd_{cnt}.txt"
-                path = os.path.join(save_dir, filename)
+            score_text = "none" if score is None else f"{float(score):.4f}"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            base_name = f"out_bd_score={score_text}_{timestamp}"
+            path = os.path.join(save_dir, base_name + ".txt")
 
             self._save_matrix_sample_txt(sample, path)
-            self._bd_sample_save_index = cnt + 1
+            raw_path = os.path.join(raw_save_dir, base_name + ".bin")
+            self._save_bd_bg_removed_signal_bin(raw_path, sample, score)
             print(f"[BD] saved positive sample: {path}")
         except Exception as e:
             print(f"[BD] save positive sample failed: {e}")
@@ -5323,6 +5403,7 @@ class App:
         self._ra_occ_h_bg_buffer.append(h_bg)
         h_norm = self._ra_occ_normalize_h(h)
         self._ra_occ_h_buffer.append(h_norm)
+        self._remember_ra_occ_raw_window()
         if len(self._ra_occ_h_buffer) < self._ra_occ_h_buffer.maxlen:
             return d
 
@@ -5387,8 +5468,12 @@ class App:
             m = self.config.current_algo
             ra_occ_data = None
 
-            for f in new_frames: 
-                tx, rx, _ = f
+            for f in new_frames:
+                if len(f) >= 4:
+                    tx, rx, cir_data, raw_frame = f
+                else:
+                    tx, rx, cir_data = f
+                    raw_frame = None
                 # 检测是否进入了新的一轮
                 if (tx, rx) == first_pair:
                     # 仅在 PLAYBACK 模式且开关打开时触发跳帧逻辑
@@ -5402,7 +5487,10 @@ class App:
                 if not self.playback_skip_state:
                     if (tx, rx) == first_pair:
                         self._ra_occ_snapshot_counter += 1
-                    self.data_manager.process_frame(*f)
+                    processed = self.data_manager.process_frame(tx, rx, cir_data)
+                    if processed is not None:
+                        cir_no_bg, _ = processed
+                        self._bd_remember_bg_removed_frame(self._ra_occ_snapshot_counter, tx, rx, raw_frame, cir_no_bg)
                     if m == 'RA-OCCUPANCY' and (tx, rx) == last_pair:
                         d_ra_occ = self._try_step_ra_occupancy()
                         if d_ra_occ:

@@ -24,6 +24,8 @@ DATA_DIR_NAME = "data_ori"
 # 保存图片标志位
 fig_save_flag = False
 
+bdflag = False
+
 # 每次滑动bin的数量
 HEATMAP_STRIDE_COMBINED = 4
 
@@ -69,7 +71,7 @@ DEFAULT_RA_OCCUPANCY_PARAMS = {
     "indices_azimuth": [2, 3, 6, 7],
     "ant_dbf_select": [2, 3, 6, 7],
     "azi_angle_range": [-60, 60],
-    "azimuth_num": 32,
+    "azimuth_num": 24,
     "ant_calib_en": True,
     "ant_calib_phase": [
         -0.0,
@@ -163,8 +165,9 @@ class BackgroundRemoval:
 
 
 class RadarDataManager:
-    def __init__(self, radar_cfg: dict):
+    def __init__(self, radar_cfg: dict, skip_background_removal: bool = False):
         self.cfg = radar_cfg
+        self.skip_background_removal = skip_background_removal
         self.pairs = [(tx, rx) for tx in radar_cfg["udp_tx_list"] for rx in radar_cfg["udp_rx_list"]]
         self.snapshots_data = {
             pair: {"complex": FixedBuffer(radar_cfg["max_snapshots"])}
@@ -177,8 +180,11 @@ class RadarDataManager:
         pair = (tx, rx)
         if pair not in self.snapshots_data:
             return
-        r_no_bg, _ = self.bgs[pair].remove_background(raw)
-        self.snapshots_data[pair]["complex"].append(r_no_bg)
+        if self.skip_background_removal:
+            self.snapshots_data[pair]["complex"].append(raw)
+        else:
+            r_no_bg, _ = self.bgs[pair].remove_background(raw)
+            self.snapshots_data[pair]["complex"].append(r_no_bg)
         if self.snapshots_data[self.pairs[0]]["complex"].is_full():
             self.buffer_full = True
 
@@ -411,7 +417,8 @@ def process_bin_file(
     fig_save_flag: bool = True,
 ):
     protocol = RadarProtocol(radar_cfg["ft_len"])
-    data_manager = RadarDataManager(radar_cfg)
+    is_bd_file = bdflag and "bd" in bin_path.stem.lower()
+    data_manager = RadarDataManager(radar_cfg, skip_background_removal=is_bd_file)
     capon_angles, capon_sv = init_capon_steering(params)
 
     first_pair = (radar_cfg["udp_tx_list"][0], radar_cfg["udp_rx_list"][0])
@@ -470,7 +477,7 @@ def process_bin_file(
             h_norm = normalize_data(h)
             output_index += 1
             last_heatmap_snapshot = snapshot_counter
-            if output_index == 1:
+            if output_index == 1 and not is_bd_file:
                 continue
 
             heatmap_index += 1
