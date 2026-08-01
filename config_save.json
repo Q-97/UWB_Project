@@ -26,17 +26,13 @@
     "current_algo": "RA-OCCUPANCY",
     "snapshot_rate": 20,
     "tap_interval_si": 1e-09,
-    "data_save_dir": "D:/cpd_data/data_in_adult",
+    "data_save_dir": "D:/cpd_data/0802/baby_in",
     "record_filename": "in_b1_d3_l2_2.bin",
     "record_duration": 30.0,
     "playback_duration": 30.0,
     "export_pc_json": false,
     "recent_save_dirs": [
-      "D:/cpd_data",
-      "D:/cpd_data/data_in_baby",
-      "D:/cpd_data/data_in_adult",
-      "D:/cpd_data/data_out",
-      "./data"
+      "D:/cpd_data/0802/data_baby_in"
     ],
     "can_device_type": "ZLGCAN",
     "mcu_name": "Calterah",
