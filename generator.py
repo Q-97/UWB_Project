@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import deque
 from pathlib import Path
 from typing import Optional
+
+for _thread_env in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "BLIS_NUM_THREADS",
+):
+    os.environ[_thread_env] = "1"
+os.environ["MKL_CBWR"] = "COMPATIBLE"
 
 import matplotlib
 import numpy as np
@@ -19,32 +31,33 @@ import matplotlib.pyplot as plt
 # =========================
 
 # 数据位置
-DATA_DIR_NAME = "data_ori"
+DATA_DIR_NAME = "data/data_ori_3"
 
 # 保存图片标志位
 fig_save_flag = False
 
-bdflag = False
+bdflag = True
 
 # 每次滑动bin的数量
 HEATMAP_STRIDE_COMBINED = 4
 
 # 保留range bin范围，包含右端点；例如(5, 14)会丢弃0-4和15
-RANGE_BIN_KEEP_RANGE = (5, 16)
+RANGE_BIN_KEEP_RANGE = (5, 12)
 
 # 放大和heatmap倍数
 IMAGE_SCALE = 10
 MATRIX_PATH_COUNT = 4
+AZIMUTH_NUM = 24
 
 # 读取config_save并覆盖GUI参数
 USE_CONFIG_SAVE = False
 
 # 结果保存位置
-OUTPUT_TAG = f"combined={HEATMAP_STRIDE_COMBINED}_range={RANGE_BIN_KEEP_RANGE[0]}-{RANGE_BIN_KEEP_RANGE[1]}_path={MATRIX_PATH_COUNT}"
-OUTPUT_ROOT_DIR_NAME = "data_in"
-MATRIX_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_matrix_h_norm"
+OUTPUT_TAG = f"combined={HEATMAP_STRIDE_COMBINED}_range={RANGE_BIN_KEEP_RANGE[0]}-{RANGE_BIN_KEEP_RANGE[1]}_path={MATRIX_PATH_COUNT}_azimuth={AZIMUTH_NUM}"
+OUTPUT_ROOT_DIR_NAME = "data/data_input_3/4,4/(55,55)"
+MATRIX_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_matrix_h4_bg_norm"
 IMAGE_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_heatmap"
-
+ 
 # =========================
 # GUI参数
 # =========================
@@ -70,8 +83,8 @@ DEFAULT_RA_OCCUPANCY_PARAMS = {
     "doppler_dc_remove": True,
     "indices_azimuth": [2, 3, 6, 7],
     "ant_dbf_select": [2, 3, 6, 7],
-    "azi_angle_range": [-60, 60],
-    "azimuth_num": 24,
+    "azi_angle_range": [-55, 55],
+    "azimuth_num": AZIMUTH_NUM,
     "ant_calib_en": True,
     "ant_calib_phase": [
         -0.0,
@@ -474,7 +487,7 @@ def process_bin_file(
                 continue
 
             h, h_bg, h_cart, _, _ = result
-            h_norm = normalize_data(h)
+            h_norm = normalize_data(h_bg)
             output_index += 1
             last_heatmap_snapshot = snapshot_counter
             if output_index == 1 and not is_bd_file:
@@ -485,17 +498,19 @@ def process_bin_file(
             if fig_save_flag:
                 save_heatmap_image(
                     h_cart,
-                    (image_output_dir / image_name).with_suffix(".png"),
+                    image_output_dir / f"{image_name}.png",
                     params,
                 )
 
-            matrix_group.append(h_norm)
+            # matrix_group.append(h_norm)
+            matrix_group.append(h_bg)
             if len(matrix_group) == MATRIX_PATH_COUNT:
                 stacked = np.stack(matrix_group, axis=0)
-                output_matrix = np.transpose(stacked, (2, 1, 0))
+                # output_matrix = np.transpose(stacked, (2, 1, 0))
+                output_matrix = normalize_data(np.transpose(stacked, (2, 1, 0)))
                 matrix_output_index += 1
                 matrix_name = f"{bin_path.stem}_path={MATRIX_PATH_COUNT}_{matrix_output_index}"
-                save_matrix_sample(output_matrix, (matrix_output_dir / matrix_name).with_suffix(".txt"))
+                save_matrix_sample(output_matrix, matrix_output_dir / f"{matrix_name}.txt")
                 matrix_group.pop(0)
 
     output_label = "matrices/heatmaps" if fig_save_flag else "matrices"
@@ -508,8 +523,8 @@ def process_bin_file(
 
 def main():
     base_dir = Path(__file__).resolve().parent
-    data_dir = base_dir / DATA_DIR_NAME
-    output_root_dir = base_dir / OUTPUT_ROOT_DIR_NAME
+    data_dir = base_dir.parent / DATA_DIR_NAME
+    output_root_dir = base_dir.parent / OUTPUT_ROOT_DIR_NAME
     matrix_output_dir = output_root_dir / MATRIX_OUTPUT_DIR_NAME
     image_output_dir = output_root_dir / IMAGE_OUTPUT_DIR_NAME
     matrix_output_dir.mkdir(parents=True, exist_ok=True)

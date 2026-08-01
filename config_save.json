@@ -17,7 +17,7 @@
     "num_tx_antennas": 2,
     "num_rx_antennas": 4,
     "rx_antenna_start_num": 4,
-    "connection_mode": "PLAYBACK",
+    "connection_mode": "UDP",
     "serial_port": "COM12",
     "baud_rate": 460800,
     "udp_ip": "127.0.0.1",
@@ -26,9 +26,9 @@
     "current_algo": "RA-OCCUPANCY",
     "snapshot_rate": 20,
     "tap_interval_si": 1e-09,
-    "data_save_dir": "./data",
-    "record_filename": "in_bebug_d4_s1_2.bin",
-    "record_duration": 60.0,
+    "data_save_dir": "D:/cpd_data/data_in_adult",
+    "record_filename": "in_b1_d3_l2_2.bin",
+    "record_duration": 30.0,
     "playback_duration": 30.0,
     "export_pc_json": false,
     "recent_save_dirs": [
@@ -688,11 +688,12 @@
       "center_freq": 7987200000.0,
       "snapshots": 144,
       "cir_combine_num": 9,
-      "leakage_offset": 5,
+      "leakage_offset": 0,
       "range_bin_keep_range": [
         5,
         16
       ],
+      "range_zero_bin": 3.0,
       "doppler_window": "chebyshev",
       "doppler_win_atten": 60,
       "doppler_dc_remove": true,
@@ -709,8 +710,8 @@
         7
       ],
       "azi_angle_range": [
-        -60,
-        60
+        -55,
+        55
       ],
       "azimuth_num": 24,
       "ant_calib_en": true,
@@ -731,7 +732,8 @@
         4
       ],
       "oa_mean_threshold": 0.05,
-      "oa_model_path": "./model/epoch-30-val-f1-100.0-sp-100.0.tflite",
+      "oa_model_path": "./model/-2/epoch-64.tflite",
+      "playback_sample_export": 0,
       "heatmap_update_stride_combined": 4,
       "plot_xlim": 1.5,
       "plot_ylim_min": -2.5,
@@ -739,6 +741,7 @@
       "heatmap_clim_mode": "auto",
       "heatmap_clim_vmin": 0,
       "heatmap_clim_vmax": 100,
+      "heatmap_background_color": "#f2f2f2",
       "occupancy_config": {
         "enable": true,
         "seat_type": "4_seats",

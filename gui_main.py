@@ -106,7 +106,7 @@ def load_config(config):
         print(f"[Config] 加载配置失败: {e}")
         return False
 
-def apply_range_bin_selection(current_cube, params):
+def apply_range_bin_selection(current_cube, params, return_start_bin=False):
     keep_range = params.get('range_bin_keep_range')
     if keep_range is not None:
         if isinstance(keep_range, str):
@@ -118,15 +118,18 @@ def apply_range_bin_selection(current_cube, params):
         max_bin = current_cube.shape[2] - 1
         start_bin = max(0, min(start_bin, max_bin))
         end_bin = max(start_bin, min(end_bin, max_bin))
-        return current_cube[:, :, start_bin:end_bin + 1, :]
+        selected = current_cube[:, :, start_bin:end_bin + 1, :]
+        return (selected, start_bin) if return_start_bin else selected
 
     drop_front = int(params.get('range_bin_drop_front', 0) or 0)
     if drop_front > 0:
         drop_front = min(drop_front, max(0, current_cube.shape[2] - 1))
-        return current_cube[:, :, drop_front:, :]
+        selected = current_cube[:, :, drop_front:, :]
+        return (selected, drop_front) if return_start_bin else selected
 
     leakage_offset = int(params.get('leakage_offset', 0))
-    return np.roll(current_cube, -leakage_offset, axis=2)
+    selected = np.roll(current_cube, -leakage_offset, axis=2)
+    return (selected, leakage_offset) if return_start_bin else selected
 
 # ==============================================================================
 # 1. Presets & Defaults
@@ -423,6 +426,7 @@ DEFAULT_ALGO_PARAMS = {
         "cir_combine_num": 1,
         "leakage_offset": 5,
         "range_bin_keep_range": [5, 13],
+        "range_zero_bin": 5.0,          # 原始 CIR 中对应物理 0 m 的 range bin
         "doppler_window": "chebyshev",
         "doppler_win_atten": 60,
         "doppler_dc_remove": True,
@@ -438,6 +442,7 @@ DEFAULT_ALGO_PARAMS = {
         "smooth_kernel": [2, 4],        # 卷积平滑核大小 [rows, cols], 可调
         "oa_mean_threshold": 0.0,
         "oa_model_path": "./model/epoch-25-val-f1-100.0-sp-100.0.tflite",
+        "playback_sample_export": 0,    # 1=回放时导出标准化后的网络输入样本
         # ---- 可视化 ----
         "heatmap_update_stride_combined": 4,
         "plot_xlim": 1.5,
@@ -446,6 +451,7 @@ DEFAULT_ALGO_PARAMS = {
         "heatmap_clim_mode": "auto",
         "heatmap_clim_vmin": -80,
         "heatmap_clim_vmax": 0,
+        "heatmap_background_color": "#f2f2f2",
     },
 
     "SEAT-OCCUPANCY": {
@@ -1906,10 +1912,12 @@ class AlgorithmProcessor:
         """
         interp = RegularGridInterpolator(
             (ranges_m, angles_deg), H,
-            bounds_error=False, fill_value=0.0)
+            bounds_error=False, fill_value=np.nan)
 
-        xs = np.arange(x_range[0], x_range[1] + res, res)
-        ys = np.arange(y_range[0], y_range[1] + res, res)
+        nx = max(1, int(round((x_range[1] - x_range[0]) / res)) + 1)
+        ny = max(1, int(round((y_range[1] - y_range[0]) / res)) + 1)
+        xs = np.linspace(x_range[0], x_range[1], nx)
+        ys = np.linspace(y_range[0], y_range[1], ny)
         X, Y = np.meshgrid(xs, ys)  # (ny, nx)
 
         R = np.sqrt(X**2 + Y**2)
@@ -1962,6 +1970,10 @@ class AlgorithmProcessor:
         H_cart, xs_cart, ys_cart = self._ra_to_cartesian(
             H_bg, ranges_m, angles_deg,
             x_range=(-xlim, xlim), y_range=(y_min, y_max), res=0.05)
+
+        # 打印最大值点坐标
+        iy, ix = np.unravel_index(np.nanargmax(H_cart), H_cart.shape)
+        print(f"最大点: x={xs_cart[ix]:.2f}m, y={ys_cart[iy]:.2f}m, value={H_cart[iy, ix]:.6f}")
 
         return {
             'heatmap': H_cart,
@@ -2635,7 +2647,8 @@ class AlgorithmProcessor:
             trim = n_comb * cir_comb
             current_cube = current_cube[:, :, :32, :trim] \
                 .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
-        current_cube = apply_range_bin_selection(current_cube, params)
+        current_cube, range_bin_start = apply_range_bin_selection(
+            current_cube, params, return_start_bin=True)
 
         # 展平 8 通道 → 选 4 通道
         # current_cube: (4 RX, 2 TX, 32 range, L chirps)
@@ -2669,7 +2682,9 @@ class AlgorithmProcessor:
             denom = np.sum((self._capon_sv.conj() * (R_inv @ self._capon_sv)), axis=0)
             H[k_idx, :] = 1.0 / np.real(np.clip(denom, 1e-12, None))
 
-        ranges_m = np.arange(K) * params['dist_per_tap']
+        range_zero_bin = float(params.get('range_zero_bin', range_bin_start))
+        range_start_bins = max(0.0, range_bin_start - range_zero_bin)
+        ranges_m = (range_start_bins + np.arange(K)) * params['dist_per_tap']
         angles_deg = np.rad2deg(self._capon_angles)
         return H, ranges_m, angles_deg, A_all, R_inv_list
 
@@ -3603,9 +3618,13 @@ class PlotPanel(tk.Frame):
             ax_hm.set_xlabel("X (m)")
             ax_hm.set_ylabel("Y (m)")
             ax_hm.grid(True, linestyle=':', alpha=0.5)
+            heatmap_bg_color = params.get('heatmap_background_color', '#f2f2f2')
+            heatmap_cmap = plt.get_cmap('jet').copy()
+            heatmap_cmap.set_bad(heatmap_bg_color)
+            ax_hm.set_facecolor(heatmap_bg_color)
             self.plots['ra_occ_hm'] = ax_hm.imshow(
-                np.zeros((100, 100)), aspect='equal', origin='lower',
-                cmap='jet', interpolation='bilinear')
+                np.ma.masked_all((100, 100)), aspect='equal', origin='lower',
+                cmap=heatmap_cmap, interpolation='bilinear')
             self.plots['ra_occ_cbar'] = self.figure.colorbar(
                 self.plots['ra_occ_hm'], ax=ax_hm, fraction=0.046, pad=0.04)
             self.plots['ra_occ_cbar'].set_label('Power')
@@ -3875,7 +3894,7 @@ class PlotPanel(tk.Frame):
             occupancy = data.get('occupancy', {})
 
             # === 左: Cartesian RA 热力图 ===
-            self.plots['ra_occ_hm'].set_data(H_cart)
+            self.plots['ra_occ_hm'].set_data(np.ma.masked_invalid(H_cart))
             self.plots['ra_occ_hm'].set_extent([xs_cart[0], xs_cart[-1],
                                                 ys_cart[0], ys_cart[-1]])
             p = data.get('params', {})
@@ -3884,9 +3903,12 @@ class PlotPanel(tk.Frame):
                 vmin = p.get('heatmap_clim_vmin', -80)
                 vmax = p.get('heatmap_clim_vmax', 0)
             else:
-                vmin = max(-80, np.percentile(H_cart[H_cart > -np.inf], 5)
-                           if np.any(H_cart > -np.inf) else -80)
-                vmax = np.max(H_cart)
+                valid_values = H_cart[np.isfinite(H_cart)]
+                if valid_values.size:
+                    vmin = max(-80, np.percentile(valid_values, 5))
+                    vmax = np.max(valid_values)
+                else:
+                    vmin, vmax = 0.0, 1.0
             if vmin >= vmax:
                 vmin = vmax - 1.0
             self.plots['ra_occ_hm'].set_clim(vmin=vmin, vmax=vmax)
@@ -5055,6 +5077,7 @@ class App:
         self._ra_occ_interpreter = None
         self._ra_occ_model_path = None
         self._ra_occ_model_failed = False
+        self._ra_occ_playback_sample_index = 0
         self.pc_export_data = []  # 新增：用于存储点云导出数据的列表
         self.playback_queue = [] # 新增：存放待处理的文件路径队列
         self.playback_skip_state = False  # False 表示处理，True 表示跳过
@@ -5132,6 +5155,7 @@ class App:
         self.ra_occupancy_detector = RAOccupancyDetector(occ_params)
         self._ra_occ_snapshot_counter = 0
         self._last_ra_occ_heatmap_snapshot = None
+        self._ra_occ_playback_sample_index = 0
         self._ra_occ_h_bg_buffer.clear()
         self._ra_occ_h_buffer.clear()
         self._ra_occ_raw_window_buffer.clear()
@@ -5307,6 +5331,38 @@ class App:
             return h
         return (h - mean) / std
 
+    def _export_ra_occ_playback_sample(self, sample):
+        """回放模式下导出送入模型前的 [angle, range, time] 标准化样本。"""
+        if self.config.connection_mode != 'PLAYBACK':
+            return
+
+        p = self.config.algo_params.get('RA-OCCUPANCY', {})
+        try:
+            enabled = int(p.get('playback_sample_export', 0)) == 1
+        except (TypeError, ValueError):
+            enabled = False
+        if not enabled or not self.config.playback_file:
+            return
+
+        sample = np.asarray(sample)
+        playback_name = os.path.splitext(os.path.basename(self.config.playback_file))[0]
+        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), playback_name)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            while True:
+                output_path = os.path.join(
+                    output_dir, f"{playback_name}_{self._ra_occ_playback_sample_index}.txt")
+                if not os.path.exists(output_path):
+                    break
+                self._ra_occ_playback_sample_index += 1
+
+            self._save_matrix_sample_txt(sample, output_path)
+
+            self._ra_occ_playback_sample_index += 1
+            print(f"[RA-OCCUPANCY] exported playback sample: {output_path}")
+        except (OSError, ValueError) as e:
+            print(f"[RA-OCCUPANCY] playback sample export failed: {e}")
+
     def _ra_occ_resolve_model_path(self, model_path):
         if not model_path:
             model_path = "./model/epoch-25-val-f1-100.0-sp-100.0.tflite"
@@ -5402,7 +5458,7 @@ class App:
         d['oa_status'] = 'out'
         self._ra_occ_h_bg_buffer.append(h_bg)
         h_norm = self._ra_occ_normalize_h(h)
-        self._ra_occ_h_buffer.append(h_norm)
+        self._ra_occ_h_buffer.append(h_bg)
         self._remember_ra_occ_raw_window()
         if len(self._ra_occ_h_buffer) < self._ra_occ_h_buffer.maxlen:
             return d
@@ -5410,6 +5466,7 @@ class App:
         bg_stacked = np.stack(list(self._ra_occ_h_bg_buffer), axis=0)
         stacked = np.stack(list(self._ra_occ_h_buffer), axis=0)
         sample = np.transpose(stacked, (2, 1, 0))
+        sample = self._ra_occ_normalize_h(sample)
         # 能量阈值计算
         h_max = float(np.max(bg_stacked))
         d['h_max'] = h_max
@@ -5417,6 +5474,7 @@ class App:
 
             return d
 
+        self._export_ra_occ_playback_sample(sample)
         label, score = self._ra_occ_run_model(sample)
         if label is not None:
             d['oa_label'] = label
