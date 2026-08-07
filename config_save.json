@@ -17,7 +17,7 @@
     "num_tx_antennas": 2,
     "num_rx_antennas": 4,
     "rx_antenna_start_num": 4,
-    "connection_mode": "UDP",
+    "connection_mode": "CAN",
     "serial_port": "COM12",
     "baud_rate": 460800,
     "udp_ip": "127.0.0.1",
@@ -26,13 +26,15 @@
     "current_algo": "RA-OCCUPANCY",
     "snapshot_rate": 20,
     "tap_interval_si": 1e-09,
-    "data_save_dir": "D:/cpd_data/0802/baby_in",
-    "record_filename": "in_b1_d3_l2_2.bin",
-    "record_duration": 30.0,
-    "playback_duration": 30.0,
+    "data_save_dir": "D:/cpd_data/0802/data_in_baby",
+    "record_filename": "in_b2_d2_s1_2.bin",
+    "record_duration": 45.0,
+    "playback_duration": 45.0,
     "export_pc_json": false,
     "recent_save_dirs": [
-      "D:/cpd_data/0802/data_baby_in"
+      "D:/cpd_data/0802/data_out",
+      "D:/cpd_data/0802/data_in_baby",
+      "D:/cpd_data/0802/data_in_adult"
     ],
     "can_device_type": "ZLGCAN",
     "mcu_name": "Calterah",
@@ -686,8 +688,8 @@
       "cir_combine_num": 9,
       "leakage_offset": 0,
       "range_bin_keep_range": [
-        5,
-        16
+        7,
+        18
       ],
       "range_zero_bin": 3.0,
       "doppler_window": "chebyshev",
@@ -712,14 +714,14 @@
       "azimuth_num": 24,
       "ant_calib_en": true,
       "ant_calib_phase": [
-        -0.0,
-        -0.49072375380773364,
-        1.1062868947533422,
-        1.5748289100316295,
-        -0.5876511374160144,
-        -1.9895222818981357,
-        0.12190304520431955,
-        0.5787126081848506
+        0,
+        0.19190371,
+        -1.417986,
+        -2.8394966,
+        0.07785571,
+        0.09267139,
+        -1.2703428,
+        -2.6441593
       ],
       "capon_diag_load": 0.001,
       "dist_per_tap": 0.15,
@@ -727,8 +729,11 @@
         2,
         4
       ],
-      "oa_mean_threshold": 0.05,
-      "oa_model_path": "./model/-2/epoch-64.tflite",
+      "oa_mean_threshold": 0.045,
+      "sample_enable": true,
+      "oa_model_path": "./model/h_bg/epoch-31-val-f1-100.0-recall-100.0.tflite",
+      "oa_filter_window_size": 5,
+      "oa_filter_in_threshold": 3,
       "playback_sample_export": 0,
       "heatmap_update_stride_combined": 4,
       "plot_xlim": 1.5,

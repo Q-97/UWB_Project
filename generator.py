@@ -31,22 +31,20 @@ import matplotlib.pyplot as plt
 # =========================
 
 # 数据位置
-DATA_DIR_NAME = "data/data_ori_3"
+DATA_DIR_NAME = "data/data_ori"
 
 # 保存图片标志位
 fig_save_flag = False
-
-bdflag = True
 
 # 每次滑动bin的数量
 HEATMAP_STRIDE_COMBINED = 4
 
 # 保留range bin范围，包含右端点；例如(5, 14)会丢弃0-4和15
-RANGE_BIN_KEEP_RANGE = (5, 12)
+RANGE_BIN_KEEP_RANGE = (7, 18)
 
 # 放大和heatmap倍数
 IMAGE_SCALE = 10
-MATRIX_PATH_COUNT = 4
+MATRIX_PATH_COUNT = 8
 AZIMUTH_NUM = 24
 
 # 读取config_save并覆盖GUI参数
@@ -54,9 +52,9 @@ USE_CONFIG_SAVE = False
 
 # 结果保存位置
 OUTPUT_TAG = f"combined={HEATMAP_STRIDE_COMBINED}_range={RANGE_BIN_KEEP_RANGE[0]}-{RANGE_BIN_KEEP_RANGE[1]}_path={MATRIX_PATH_COUNT}_azimuth={AZIMUTH_NUM}"
-OUTPUT_ROOT_DIR_NAME = "data/data_input_3/4,4/(55,55)"
-MATRIX_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_matrix_h4_bg_norm"
-IMAGE_OUTPUT_DIR_NAME = f"2026_7_7_{OUTPUT_TAG}_heatmap"
+OUTPUT_ROOT_DIR_NAME = "data/data_input/4,8/(65,65)"
+MATRIX_OUTPUT_DIR_NAME = f"2026_8_5_{OUTPUT_TAG}_matrix_h_bg_norm"
+IMAGE_OUTPUT_DIR_NAME = f"2026_8_5_{OUTPUT_TAG}_heatmap"
  
 # =========================
 # GUI参数
@@ -83,19 +81,10 @@ DEFAULT_RA_OCCUPANCY_PARAMS = {
     "doppler_dc_remove": True,
     "indices_azimuth": [2, 3, 6, 7],
     "ant_dbf_select": [2, 3, 6, 7],
-    "azi_angle_range": [-55, 55],
+    "azi_angle_range": [-65, 65],
     "azimuth_num": AZIMUTH_NUM,
     "ant_calib_en": True,
-    "ant_calib_phase": [
-        -0.0,
-        -0.49072375380773364,
-        1.1062868947533422,
-        1.5748289100316295,
-        -0.5876511374160144,
-        -1.9895222818981357,
-        0.12190304520431955,
-        0.5787126081848506,
-    ],
+    "ant_calib_phase": [0. ,  0.19190371, -1.417986  , -2.8394966 ,  0.07785571, 0.09267139, -1.2703428 , -2.6441593 ],
     "capon_diag_load": 1e-3,
     "dist_per_tap": 0.15,
     "smooth_kernel": [2, 4],
@@ -178,9 +167,8 @@ class BackgroundRemoval:
 
 
 class RadarDataManager:
-    def __init__(self, radar_cfg: dict, skip_background_removal: bool = False):
+    def __init__(self, radar_cfg: dict):
         self.cfg = radar_cfg
-        self.skip_background_removal = skip_background_removal
         self.pairs = [(tx, rx) for tx in radar_cfg["udp_tx_list"] for rx in radar_cfg["udp_rx_list"]]
         self.snapshots_data = {
             pair: {"complex": FixedBuffer(radar_cfg["max_snapshots"])}
@@ -193,11 +181,8 @@ class RadarDataManager:
         pair = (tx, rx)
         if pair not in self.snapshots_data:
             return
-        if self.skip_background_removal:
-            self.snapshots_data[pair]["complex"].append(raw)
-        else:
-            r_no_bg, _ = self.bgs[pair].remove_background(raw)
-            self.snapshots_data[pair]["complex"].append(r_no_bg)
+        r_no_bg, _ = self.bgs[pair].remove_background(raw)
+        self.snapshots_data[pair]["complex"].append(r_no_bg)
         if self.snapshots_data[self.pairs[0]]["complex"].is_full():
             self.buffer_full = True
 
@@ -430,8 +415,7 @@ def process_bin_file(
     fig_save_flag: bool = True,
 ):
     protocol = RadarProtocol(radar_cfg["ft_len"])
-    is_bd_file = bdflag and "bd" in bin_path.stem.lower()
-    data_manager = RadarDataManager(radar_cfg, skip_background_removal=is_bd_file)
+    data_manager = RadarDataManager(radar_cfg)
     capon_angles, capon_sv = init_capon_steering(params)
 
     first_pair = (radar_cfg["udp_tx_list"][0], radar_cfg["udp_rx_list"][0])
@@ -487,10 +471,9 @@ def process_bin_file(
                 continue
 
             h, h_bg, h_cart, _, _ = result
-            h_norm = normalize_data(h_bg)
             output_index += 1
             last_heatmap_snapshot = snapshot_counter
-            if output_index == 1 and not is_bd_file:
+            if output_index == 1:
                 continue
 
             heatmap_index += 1
@@ -501,19 +484,16 @@ def process_bin_file(
                     image_output_dir / f"{image_name}.png",
                     params,
                 )
-
-            # matrix_group.append(h_norm)
-            matrix_group.append(h_bg)
+            h_norm = normalize_data(h_bg)
+            matrix_group.append(h_norm)
             if len(matrix_group) == MATRIX_PATH_COUNT:
                 stacked = np.stack(matrix_group, axis=0)
-                # output_matrix = np.transpose(stacked, (2, 1, 0))
-                output_matrix = normalize_data(np.transpose(stacked, (2, 1, 0)))
+                output_matrix = np.transpose(stacked, (2, 1, 0))
                 matrix_output_index += 1
                 matrix_name = f"{bin_path.stem}_path={MATRIX_PATH_COUNT}_{matrix_output_index}"
                 save_matrix_sample(output_matrix, matrix_output_dir / f"{matrix_name}.txt")
                 matrix_group.pop(0)
 
-    output_label = "matrices/heatmaps" if fig_save_flag else "matrices"
     print(
         f"{bin_path.name}: saved {matrix_output_index} matrix sample(s), {heatmap_index} heatmap(s)"
         + (f", discarded {len(matrix_group)} ungrouped matrix/matrices" if matrix_group else "")
@@ -532,9 +512,12 @@ def main():
         image_output_dir.mkdir(parents=True, exist_ok=True)
 
     radar_cfg, params = load_project_config(base_dir)
-    bin_files = sorted(data_dir.glob("*.bin"))
+    bin_files = sorted(
+        bin_path for bin_path in data_dir.glob("*.bin")
+        if "bd" not in bin_path.stem.lower()
+    )
     if not bin_files:
-        print(f"No .bin files found in {data_dir}")
+        print(f"No non-BD .bin files found in {data_dir}")
         return
 
     print(f"Input folder: {data_dir}")

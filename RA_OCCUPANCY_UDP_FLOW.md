@@ -37,14 +37,17 @@ flowchart TD
 
 ## 1. UDP 服务启动
 
-当配置里的 `connection_mode` 是 `UDP` 或 `BD` 时，实时数据源会启动 `UDPFrameServer`。`BD` 也走同一个 UDP 接收入口。
+当配置里的 `connection_mode` 是 `UDP` 或 `BD_UDP` 时，实时数据源会启动 `UDPFrameServer`。`BD_UDP` 走 UDP 接收入口；`BD_CAN` 则复用 CAN 模式的 `CANFrameServer`，后续都封装成标准帧进入同一条处理链路。
 
 ```python
 class LiveRadarSource:
     def start(self):
         self.running = True; RadarProtocol.update_protocol(self.config.ft_len)
-        if self.config.connection_mode in ('UDP', 'BD'):
+        if self.config.connection_mode in ('UDP', 'BD_UDP'):
             self.udp_server = UDPFrameServer(ConfigAdapter(self.config)); self.udp_server.start()
+        elif self.config.connection_mode in ('CAN', 'BD_CAN'):
+            self.can_server = CANFrameServer(ConfigAdapter(self.config))
+            self.can_server.start()
 ```
 
 这里先调用：
@@ -146,8 +149,12 @@ def _io_loop(self):
     while self.running:
         raw_chunk = b''
         try:
-            if self.config.connection_mode in ('UDP', 'BD'):
+            if self.config.connection_mode in ('UDP', 'BD_UDP'):
                 f = self.udp_server.get_frame()
+                raw_chunk = f if f else b''
+                time.sleep(0.002) if not f else None
+            elif self.config.connection_mode in ('CAN', 'BD_CAN'):
+                f = self.can_server.get_frame()
                 raw_chunk = f if f else b''
                 time.sleep(0.002) if not f else None
         except:
@@ -233,7 +240,7 @@ for f in new_frames:
 
 - `tx/rx` 标识当前通道。
 - `cir_data` 是已经解析好的复数 CIR。
-- `raw_frame` 是原始标准帧，主要用于录制或 BD 分支保存样本。
+- `raw_frame` 是原始标准帧，主要用于录制或 BD_UDP / BD_CAN 分支触发计数。
 
 ## 5. 以第一个通道标记新 snapshot
 
@@ -1245,4 +1252,3 @@ UDP packet
 -> 输出 0/1/2 三态座位状态
 -> GUI 显示热力图、座位颜色和状态格
 ```
-

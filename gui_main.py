@@ -89,6 +89,8 @@ def load_config(config):
         for key, val in rc.items():
             if hasattr(config, key):
                 setattr(config, key, val)
+        if config.connection_mode == "BD":
+            config.connection_mode = "BD_UDP"
         # 算法参数: 浅合并, 保留代码默认值中的新 key
         saved_params = data.get("algo_params", {})
         for algo_name, params in saved_params.items():
@@ -441,7 +443,10 @@ DEFAULT_ALGO_PARAMS = {
         # ---- 后处理 ----
         "smooth_kernel": [2, 4],        # 卷积平滑核大小 [rows, cols], 可调
         "oa_mean_threshold": 0.0,
+        "sample_enable": True,          # True=enable TFLite model, False=bypass model
         "oa_model_path": "./model/epoch-25-val-f1-100.0-sp-100.0.tflite",
+        "oa_filter_window_size": 5,
+        "oa_filter_in_threshold": 3,
         "playback_sample_export": 0,    # 1=回放时导出标准化后的网络输入样本
         # ---- 可视化 ----
         "heatmap_update_stride_combined": 4,
@@ -576,7 +581,7 @@ class RadarConfig:
     num_rx_antennas: int = 4
     rx_antenna_start_num: int = 4
     
-    connection_mode: str = "UDP"  # "UDP", "BD", "SERIAL", "CAN", "PLAYBACK"
+    connection_mode: str = "UDP"  # "UDP", "BD_UDP", "BD_CAN", "SERIAL", "CAN", "PLAYBACK"
     serial_port: str = "COM6"
     baud_rate: int = 460800
     udp_ip: str = "127.0.0.1"
@@ -1950,6 +1955,13 @@ class AlgorithmProcessor:
         smooth_kernel = np.ones((kernel_size[0], kernel_size[1])) / (kernel_size[0] * kernel_size[1])
         H_bg = ndimage.convolve(H_bg, smooth_kernel, mode='reflect')
 
+        # Read range and angle directly from the polar RA heatmap before
+        # Cartesian remapping introduces its own spatial quantization.
+        peak_range_idx, peak_angle_idx = np.unravel_index(
+            np.nanargmax(H_bg), H_bg.shape)
+        peak_range_m = float(ranges_m[peak_range_idx])
+        peak_angle_deg = float(angles_deg[peak_angle_idx])
+
         # 每座位能量和
         occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
         seat_type = occ_params.get('seat_type', '4_seats')
@@ -1971,9 +1983,10 @@ class AlgorithmProcessor:
             H_bg, ranges_m, angles_deg,
             x_range=(-xlim, xlim), y_range=(y_min, y_max), res=0.05)
 
-        # 打印最大值点坐标
+        # Cartesian heatmap peak, retained separately from the polar RA peak.
         iy, ix = np.unravel_index(np.nanargmax(H_cart), H_cart.shape)
-        print(f"最大点: x={xs_cart[ix]:.2f}m, y={ys_cart[iy]:.2f}m, value={H_cart[iy, ix]:.6f}")
+        peak_x_m = float(xs_cart[ix])
+        peak_y_m = float(ys_cart[iy])
 
         return {
             'heatmap': H_cart,
@@ -1983,6 +1996,10 @@ class AlgorithmProcessor:
             'ys_cart': ys_cart,
             'ranges_m': ranges_m,
             'angles_deg': angles_deg,
+            'peak_range_m': peak_range_m,
+            'peak_angle_deg': peak_angle_deg,
+            'peak_x_m': peak_x_m,
+            'peak_y_m': peak_y_m,
             'energy': energy_dict,
             'params': params,
         }
@@ -3320,9 +3337,9 @@ class LiveRadarSource:
         self.rec_start_time = 0; self.rec_duration_target = 0; self.measured_fps = 0.0; self.last_fps_time = time.time(); self.frame_count_sec = 0
     def start(self):
         self.running = True; RadarProtocol.update_protocol(self.config.ft_len)
-        if self.config.connection_mode in ('UDP', 'BD'):
+        if self.config.connection_mode in ('UDP', 'BD_UDP'):
             self.udp_server = UDPFrameServer(ConfigAdapter(self.config)); self.udp_server.start()
-        elif self.config.connection_mode == 'CAN':
+        elif self.config.connection_mode in ('CAN', 'BD_CAN'):
 
             ret = init_device(self.config.can_device_type)
 
@@ -3334,7 +3351,7 @@ class LiveRadarSource:
             radar_hardware_init()
             self.can_server = CANFrameServer(ConfigAdapter(self.config))
             self.can_server.start()
-            print("[LiveRadarSource] CAN 接收模式已启动")
+            print(f"[LiveRadarSource] {self.config.connection_mode} 接收模式已启动")
         self.thread = threading.Thread(target=self._io_loop, daemon=True); self.thread.start(); return True
     def stop(self):
         self.running = False; self.stop_recording()
@@ -3365,8 +3382,8 @@ class LiveRadarSource:
             if now - self.last_fps_time >= 1.0: self.measured_fps = self.frame_count_sec / (now - self.last_fps_time); self.frame_count_sec = 0; self.last_fps_time = now
             raw_chunk = b''
             try:
-                if self.config.connection_mode in ('UDP', 'BD'): f = self.udp_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
-                elif self.config.connection_mode == 'CAN': f = self.can_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
+                if self.config.connection_mode in ('UDP', 'BD_UDP'): f = self.udp_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
+                elif self.config.connection_mode in ('CAN', 'BD_CAN'): f = self.can_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
                 elif self.config.connection_mode == 'SERIAL': raw_chunk = ser.read(ser.in_waiting) if ser.in_waiting else b''; time.sleep(0.002) if not raw_chunk else None
             except: pass
             if not raw_chunk: continue
@@ -3538,11 +3555,19 @@ class PlotPanel(tk.Frame):
         self.figure = plt.Figure(figsize=(10, 6), dpi=100); 
         self.canvas = FigureCanvasTkAgg(self.figure, self); 
         self.canvas.get_tk_widget().pack(fill='both', expand=True); 
-        self.axes = {}; 
+        self.axes = {};
         self.plots = {}
-        self.pc_history = []  # 用于存储当前活跃的点云缓存    
+        self.pc_history = []  # 用于存储当前活跃的点云缓存
+        self.ra_occ_peak_history = deque(maxlen=5)
+        self.ra_occ_oa_filter_history = deque(maxlen=5)
     def init_layout(self, mode, params):
         self.figure.clf(); self.axes = {}; self.plots = {}
+        self.ra_occ_peak_history.clear()
+        try:
+            filter_window_size = max(1, int(params.get('oa_filter_window_size', 5)))
+        except (TypeError, ValueError):
+            filter_window_size = 5
+        self.ra_occ_oa_filter_history = deque(maxlen=filter_window_size)
         if mode == 'PLOT':
             ax = self.figure.add_subplot(111); ax.set_title("Waveform"); ax.grid(True)
             self.plots['line_abs'], = ax.plot([], [], 'r-', label='Abs'); self.plots['line_real'], = ax.plot([], [], 'b-', alpha=0.5, label='Real'); self.plots['line_imag'], = ax.plot([], [], 'g-', alpha=0.5, label='Imag')
@@ -3609,9 +3634,12 @@ class PlotPanel(tk.Frame):
                 cmap='jet', interpolation='bilinear')
             self.axes['main'] = ax
         elif mode == 'RA-OCCUPANCY':
-            gs = self.figure.add_gridspec(1, 2, width_ratios=[2, 1])
+            gs = self.figure.add_gridspec(
+                2, 2, width_ratios=[2, 1], height_ratios=[3, 1],
+                hspace=0.08)
             ax_hm = self.figure.add_subplot(gs[0, 0])
-            ax_occ = self.figure.add_subplot(gs[0, 1])
+            ax_info = self.figure.add_subplot(gs[1, 0])
+            ax_occ = self.figure.add_subplot(gs[:, 1])
 
             # 左: Cartesian RA 热力图 + 座位椭圆
             # ax_hm.set_title("RA Occupancy Heatmap (Cartesian)")
@@ -3637,6 +3665,25 @@ class PlotPanel(tk.Frame):
                 0.84, 1.243, "OUT", transform=ax_hm.transAxes,
                 ha='center', va='center', fontsize=9, fontweight='bold',
                 color='white', clip_on=False, zorder=7)
+            self.plots['ra_occ_oa_filter_button'] = patches.Rectangle(
+                (0.44, 1.21), 0.24, 0.065, transform=ax_hm.transAxes,
+                facecolor='green', edgecolor='#222222', linewidth=1.2,
+                clip_on=False, zorder=6)
+            ax_hm.add_patch(self.plots['ra_occ_oa_filter_button'])
+            self.plots['ra_occ_oa_filter_text'] = ax_hm.text(
+                0.56, 1.243, "OUT", transform=ax_hm.transAxes,
+                ha='center', va='center', fontsize=9, fontweight='bold',
+                color='white', clip_on=False, zorder=7)
+
+            ax_info.axis('off')
+            self.plots['ra_occ_peak_info'] = ax_info.text(
+                0.5, 0.5,
+                "Mode[5] | Range: -- m | Angle: -- deg\n"
+                "XY peak | X: -- m | Y: -- m\n"
+                "Mean[5] | Range: -- m | Angle: -- deg",
+                ha='center', va='center', fontsize=20, fontweight='bold',
+                linespacing=1.25,
+                transform=ax_info.transAxes)
 
             # 画座位椭圆 (Cartesian 坐标系, 复用 _draw_seating_ellipses)
             occ_params = params.copy()
@@ -3698,7 +3745,7 @@ class PlotPanel(tk.Frame):
                     'energy_text': t_energy,
                 }
 
-            self.axes = {'main': ax_hm, 'occ': ax_occ}
+            self.axes = {'main': ax_hm, 'info': ax_info, 'occ': ax_occ}
         elif mode == 'ANGLE-SPECTRUM':
             gs = self.figure.add_gridspec(1, 2, width_ratios=[3, 1])
             ax_as = self.figure.add_subplot(gs[0, 0])
@@ -3752,6 +3799,46 @@ class PlotPanel(tk.Frame):
             self.axes = {'as': ax_as, 'rd': ax_rd}
         self.canvas.draw()
 
+    def _update_ra_occ_oa_filter(self, oa_label, oa_status, params):
+        """Apply the configurable majority filter to raw OA button values."""
+        try:
+            window_size = max(1, int(params.get('oa_filter_window_size', 5)))
+        except (TypeError, ValueError):
+            window_size = 5
+        try:
+            in_threshold = int(params.get('oa_filter_in_threshold', 3))
+        except (TypeError, ValueError):
+            in_threshold = 3
+        in_threshold = max(1, min(window_size, in_threshold))
+
+        if self.ra_occ_oa_filter_history.maxlen != window_size:
+            self.ra_occ_oa_filter_history = deque(
+                list(self.ra_occ_oa_filter_history)[-window_size:],
+                maxlen=window_size)
+
+        raw_status = str(oa_status or 'out').lower()
+        try:
+            raw_is_in = int(oa_label or 0) == 1
+        except (TypeError, ValueError):
+            raw_is_in = False
+        self.ra_occ_oa_filter_history.append(1 if raw_is_in else 0)
+        history = self.ra_occ_oa_filter_history
+        in_count = sum(history)
+
+        # Wait for one complete window before allowing a filtered IN result.
+        if len(history) >= window_size and in_count >= in_threshold:
+            filtered_label, filtered_status = 1, 'in'
+        else:
+            filtered_label = 0
+            filtered_status = 'empty' if raw_status == 'empty' else 'out'
+
+        if 'ra_occ_oa_filter_button' in self.plots:
+            color = 'red' if filtered_label == 1 else 'green'
+            text = 'IN' if filtered_label == 1 else (
+                'EMPTY' if filtered_status == 'empty' else 'OUT')
+            self.plots['ra_occ_oa_filter_button'].set_facecolor(color)
+            self.plots['ra_occ_oa_filter_text'].set_text(text)
+        return filtered_label, filtered_status
 
     def update_data(self, mode, data):
         if not data: return
@@ -3913,12 +4000,52 @@ class PlotPanel(tk.Frame):
                 vmin = vmax - 1.0
             self.plots['ra_occ_hm'].set_clim(vmin=vmin, vmax=vmax)
 
+            peak_range_m = data.get('peak_range_m')
+            peak_angle_deg = data.get('peak_angle_deg')
+            peak_x_m = data.get('peak_x_m')
+            peak_y_m = data.get('peak_y_m')
+            if all(value is not None for value in
+                   (peak_range_m, peak_angle_deg, peak_x_m, peak_y_m)):
+                self.ra_occ_peak_history.append(
+                    (float(peak_range_m), float(peak_angle_deg)))
+                recent_peaks = list(self.ra_occ_peak_history)
+
+                def latest_mode(values):
+                    counts = {value: values.count(value) for value in values}
+                    max_count = max(counts.values())
+                    return next(value for value in reversed(values)
+                                if counts[value] == max_count)
+
+                recent_ranges = [peak[0] for peak in recent_peaks]
+                recent_angles = [peak[1] for peak in recent_peaks]
+                mode_range_m = latest_mode(recent_ranges)
+                mode_angle_deg = latest_mode(recent_angles)
+                mean_range_m = float(np.mean(recent_ranges))
+                mean_angle_deg = float(np.mean(recent_angles))
+                sample_count = len(recent_peaks)
+                peak_text = (
+                    f"Mode[{sample_count}] | Range: {mode_range_m:.2f} m | "
+                    f"Angle: {mode_angle_deg:+.1f} deg\n"
+                    f"XY peak | X: {peak_x_m:+.2f} m | "
+                    f"Y: {peak_y_m:+.2f} m\n"
+                    f"Mean[{sample_count}] | Range: {mean_range_m:.2f} m | "
+                    f"Angle: {mean_angle_deg:+.1f} deg")
+            else:
+                peak_text = (
+                    "Mode[5] | Range: -- m | Angle: -- deg\n"
+                    "XY peak | X: -- m | Y: -- m\n"
+                    "Mean[5] | Range: -- m | Angle: -- deg")
+            self.plots['ra_occ_peak_info'].set_text(peak_text)
+
             h_max = float(data.get('h_max', 0.0))
             mean_th = float(data.get('oa_mean_threshold', p.get('oa_mean_threshold', 0.0)))
             oa_label = data.get('oa_label', 0)
             oa_score = data.get('oa_score', None)
             oa_status = data.get('oa_status', 'out')
             score_text = "" if oa_score is None else f" | score={oa_score:.3f}"
+
+            # The filtered OA indicator is computed independently from the raw indicator below.
+            self._update_ra_occ_oa_filter(oa_label, oa_status, p)
             if 'ra_occ_oa_button' in self.plots:
                 color = 'red' if oa_label == 1 else 'green'
                 text = 'IN' if oa_label == 1 else ('EMPTY' if oa_status == 'empty' else 'OUT')
@@ -4454,7 +4581,7 @@ class ControlPanel(tk.Frame):
         frm_mode = tk.Frame(self, bg='#f0f0f0')
         frm_mode.pack(fill='x', padx=5, pady=5)
         self.mode_var = tk.StringVar(value=config.connection_mode)
-        ttk.Combobox(frm_mode, textvariable=self.mode_var, values=('UDP', 'BD', 'SERIAL', 'CAN', 'PLAYBACK'), state='readonly').pack(fill='x')
+        ttk.Combobox(frm_mode, textvariable=self.mode_var, values=('UDP', 'BD_UDP', 'BD_CAN', 'SERIAL', 'CAN', 'PLAYBACK'), state='readonly').pack(fill='x')
         self.mode_var.trace_add('write', self._on_mode_change)
 
         # --- 基础配置区域 (折叠或简化显示) ---
@@ -4538,7 +4665,7 @@ class ControlPanel(tk.Frame):
         row_pos = tk.Frame(frm_rec, bg='#f0f0f0')
         row_pos.pack(fill='x', padx=2, pady=2)
         tk.Label(row_pos, text="位置编号:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
-        for value in ("1", "2", "3", "4", "5"):
+        for value in ("1", "2", "3", "4"):
             tk.Radiobutton(row_pos, text=value, value=value, variable=self.var_record_pos,
                            bg='#f0f0f0', command=self._refresh_filename_preview).pack(side='left', padx=3)
 
@@ -4552,7 +4679,7 @@ class ControlPanel(tk.Frame):
         row_pose_lie = tk.Frame(frm_rec, bg='#f0f0f0')
         row_pose_lie.pack(fill='x', padx=2, pady=2)
         tk.Label(row_pose_lie, text="姿势-躺:", bg='#f0f0f0', width=12, anchor='w').pack(side='left')
-        for text, value in (("躺1", "l1"), ("躺2", "l2"), ("躺3", "l3")):
+        for text, value in (("躺1", "l1"), ("躺2", "l2"), ("躺3", "l3"), ("躺4", "l4")):
             tk.Radiobutton(row_pose_lie, text=text, value=value, variable=self.var_record_pose,
                            bg='#f0f0f0', command=self._refresh_filename_preview).pack(side='left', padx=3)
 
@@ -4869,7 +4996,7 @@ class ControlPanel(tk.Frame):
     def _on_mode_change(self, *_):
         self.config.connection_mode = self.mode_var.get()
         is_pb = (self.config.connection_mode == 'PLAYBACK')
-        is_can = (self.config.connection_mode == 'CAN')
+        is_can = (self.config.connection_mode in ('CAN', 'BD_CAN'))
 
         if is_pb:
             self.btn_rec.config(state='disabled')
@@ -5070,10 +5197,11 @@ class App:
         self.plot_panel.init_layout("PLOT", self.config.algo_params['PLOT'])
         self._ra_occ_snapshot_counter = 0
         self._last_ra_occ_heatmap_snapshot = None
-        self._ra_occ_h_bg_buffer = deque(maxlen=4)
-        self._ra_occ_h_buffer = deque(maxlen=4)
-        self._ra_occ_raw_window_buffer = deque(maxlen=4)
+        self._ra_occ_h_bg_buffer = deque(maxlen=8)
+        self._ra_occ_h_buffer = deque(maxlen=8)
+        self._ra_occ_raw_window_buffer = deque(maxlen=8)
         self._bd_bg_removed_snapshot_buffer = deque(maxlen=3000)
+        self.bd_trigger_count = 0
         self._ra_occ_interpreter = None
         self._ra_occ_model_path = None
         self._ra_occ_model_failed = False
@@ -5108,6 +5236,8 @@ class App:
         print(f"参数已更新，算法 {mode} 将重新初始化...")
     def start(self):
         RadarProtocol.update_protocol(self.config.ft_len)
+        if self.config.current_algo == 'RA-OCCUPANCY':
+            self.plot_panel.ra_occ_oa_filter_history.clear()
         # 新增：如果是回放模式，重置导出缓存
         if self.config.connection_mode == 'PLAYBACK':
             # 如果配置中有文件列表，则初始化队列
@@ -5123,6 +5253,8 @@ class App:
             # 实时模式逻辑不变
             self.source = LiveRadarSource(self.config)
             if not self.source.start(): return
+            if self.config.connection_mode in ('BD_UDP', 'BD_CAN'):
+                self.bd_trigger_count = 0
             self._ra_occ_snapshot_counter = 0
             self._last_ra_occ_heatmap_snapshot = None
             self._ra_occ_h_bg_buffer.clear()
@@ -5154,6 +5286,7 @@ class App:
         self.seat_detector = SeatOccupancyDetector(occ_params)
         self.ra_occupancy_detector = RAOccupancyDetector(occ_params)
         self._ra_occ_snapshot_counter = 0
+        self.plot_panel.ra_occ_oa_filter_history.clear()
         self._last_ra_occ_heatmap_snapshot = None
         self._ra_occ_playback_sample_index = 0
         self._ra_occ_h_bg_buffer.clear()
@@ -5276,8 +5409,9 @@ class App:
 
     def _save_bd_bg_removed_signal_bin(self, path, sample, score=None):
         frames, snapshot_start, snapshot_end = self._bd_bg_removed_frames_for_current_sample()
+        mode = self.config.connection_mode
         if not frames:
-            print("[BD] background-removed signal save skipped: snapshot history is empty")
+            print(f"[{mode}] background-removed signal save skipped: snapshot history is empty")
             return 0
 
         with open(path, "wb") as f:
@@ -5298,31 +5432,18 @@ class App:
             with open(path + ".meta", "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=4, cls=NpEncoder, ensure_ascii=False)
         except Exception as e:
-            print(f"[BD] background-removed signal meta save failed: {e}")
+            print(f"[{mode}] background-removed signal meta save failed: {e}")
 
-        print(f"[BD] saved background-removed signal: {path} ({len(frames)} frames)")
+        print(f"[{mode}] saved background-removed signal: {path} ({len(frames)} frames)")
         return len(frames)
 
     def _save_bd_positive_sample(self, sample, score=None):
-        try:
-            save_root = self.config.data_save_dir or "./data"
-            folder_name = self._bd_sample_folder_name(sample)
-            save_dir = os.path.join(save_root, "bd", folder_name)
-            raw_save_dir = os.path.join(save_root, "bd_ori", folder_name)
-            os.makedirs(save_dir, exist_ok=True)
-            os.makedirs(raw_save_dir, exist_ok=True)
+        self._count_bd_trigger(score)
 
-            score_text = "none" if score is None else f"{float(score):.4f}"
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            base_name = f"out_bd_score={score_text}_{timestamp}"
-            path = os.path.join(save_dir, base_name + ".txt")
-
-            self._save_matrix_sample_txt(sample, path)
-            raw_path = os.path.join(raw_save_dir, base_name + ".bin")
-            self._save_bd_bg_removed_signal_bin(raw_path, sample, score)
-            print(f"[BD] saved positive sample: {path}")
-        except Exception as e:
-            print(f"[BD] save positive sample failed: {e}")
+    def _count_bd_trigger(self, score=None):
+        self.bd_trigger_count += 1
+        score_text = "none" if score is None else f"{float(score):.4f}"
+        print(f"[{self.config.connection_mode}] positive trigger #{self.bd_trigger_count}: score={score_text}")
 
     def _ra_occ_normalize_h(self, h, eps=1e-6):
         mean = np.mean(h)
@@ -5330,6 +5451,12 @@ class App:
         if std <= eps:
             return h
         return (h - mean) / std
+
+    def _ra_occ_model_enabled(self):
+        value = self.config.algo_params.get('RA-OCCUPANCY', {}).get('sample_enable', True)
+        if isinstance(value, str):
+            return value.strip().lower() in ('1', 'true', 'yes', 'y', 'on', 'enable', 'enabled')
+        return bool(value)
 
     def _export_ra_occ_playback_sample(self, sample):
         """回放模式下导出送入模型前的 [angle, range, time] 标准化样本。"""
@@ -5457,8 +5584,8 @@ class App:
 
         d['oa_status'] = 'out'
         self._ra_occ_h_bg_buffer.append(h_bg)
-        h_norm = self._ra_occ_normalize_h(h)
-        self._ra_occ_h_buffer.append(h_bg)
+        h_norm = self._ra_occ_normalize_h(h_bg)
+        self._ra_occ_h_buffer.append(h_norm)
         self._remember_ra_occ_raw_window()
         if len(self._ra_occ_h_buffer) < self._ra_occ_h_buffer.maxlen:
             return d
@@ -5466,24 +5593,27 @@ class App:
         bg_stacked = np.stack(list(self._ra_occ_h_bg_buffer), axis=0)
         stacked = np.stack(list(self._ra_occ_h_buffer), axis=0)
         sample = np.transpose(stacked, (2, 1, 0))
-        sample = self._ra_occ_normalize_h(sample)
+        # sample = self._ra_occ_normalize_h(sample)
         # 能量阈值计算
-        h_max = float(np.max(bg_stacked))
+        h_max = float(np.max(h))
         d['h_max'] = h_max
         if h_max < mean_th:
 
             return d
 
         self._export_ra_occ_playback_sample(sample)
-        label, score = self._ra_occ_run_model(sample)
+
+        if self._ra_occ_model_enabled():
+            label, score = self._ra_occ_run_model(sample)
+        else:
+            label, score = 1, 1.0
         if label is not None:
             d['oa_label'] = label
             d['oa_score'] = score
             d['oa_status'] = 'in' if label == 1 else 'out'
-            if self.config.connection_mode == 'BD':
-                print(f"[BD] model prediction: label={label}, score={score:.4f}")
+            if self.config.connection_mode in ('BD_UDP', 'BD_CAN'):
                 if label == 1:
-                    self._save_bd_positive_sample(sample, score)
+                    self._count_bd_trigger(score)
         return d
 
     def _ra_occ_stride_raw(self):
@@ -5550,6 +5680,7 @@ class App:
                         cir_no_bg, _ = processed
                         self._bd_remember_bg_removed_frame(self._ra_occ_snapshot_counter, tx, rx, raw_frame, cir_no_bg)
                     if m == 'RA-OCCUPANCY' and (tx, rx) == last_pair:
+                        # print(int(time.time()*1000))
                         d_ra_occ = self._try_step_ra_occupancy()
                         if d_ra_occ:
                             ra_occ_data = d_ra_occ
