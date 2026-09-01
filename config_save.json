@@ -17,7 +17,7 @@
     "num_tx_antennas": 2,
     "num_rx_antennas": 4,
     "rx_antenna_start_num": 4,
-    "connection_mode": "CAN",
+    "connection_mode": "SERIAL",
     "serial_port": "COM12",
     "baud_rate": 460800,
     "udp_ip": "127.0.0.1",
