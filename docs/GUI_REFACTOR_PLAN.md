@@ -7,6 +7,25 @@
 
 ---
 
+## 改造进度（实施中自动更新）
+
+| 阶段 | 内容 | 状态 | 说明 |
+|---|---|---|---|
+| 0 | 基线 | ✅ 部分 | 用现有 `data/in_a1_d1_s1_1.bin` 作基准；`tools/regression_smoke.py` 已建为回归工具（录制新样本需硬件） |
+| 1 | 纯搬迁拆包 | ✅ 完成 | commit `a855203`；gui_main.py 变薄 shim；修复 3 处 `__file__` 路径基准 |
+| 2 | 硬编码配置化 | ✅ 完成 | commit `0266625`；config_save.json v2 分区（paths/gui/protocol/recording）+ deepcopy + get_algo + 校验；顺带修复 `algorithms.py` 缺 `import time` |
+| 3 | 解耦与优化 | 🔶 第一批 | commit `5f0973d`：FrameParser 注册表(3.1) / BaseSource 抽象(3.3) / 死代码清理(3.5) / TTS 封装(3.10) |
+| 4 | 回归 | ⏳ 待做 | 需用户真机/窗口点检 |
+
+阶段 3 剩余项（按风险排序，待续）：
+- **3.7 统一双 DBF 缓存**（`_dbf_sv` vs `_dbf_sv_cache`，两处引导矢量构造方向/校准不同，需先核对再合并）
+- **3.4 App 瘦身**（`_bd_*`/`_ra_occ_*` 迁往 `ra_occ_model.py`）
+- **3.2 输出 TypedDict 契约**（9 条流水线返回值类型化）
+- **3.6 三段共享预处理消重**（回归风险最高，须回放对比）
+- **3.8 性能优化 / 3.9 类型注解**（低风险，随改随验）
+
+---
+
 ## 0. 目标与原则
 
 ### 0.1 三大目标
