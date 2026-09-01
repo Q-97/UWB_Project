@@ -1,10 +1,10 @@
-"""算法层：AlgorithmProcessor（9 条流水线）+ 算法辅助函数。
+﻿"""算法层：AlgorithmProcessor（9 条流水线）+ 算法辅助函数。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 import numpy as np
 from scipy import ndimage, signal
@@ -56,6 +56,76 @@ def calculate_mdl_asc_local(k, eigvals_asc, M, L):
     term1 = -L * p * np.log(geom_mean / arith_mean)
     term2 = 0.5 * k * (2 * M - k) * np.log(L)
     return term1 + term2
+
+
+# ==============================================================================
+# step_* 返回值契约（阶段 3.2：TypedDict，供静态检查与 GUI 侧读取约定）
+# 键以各流水线实际返回为准（tools/regression_smoke 采集）
+# ==============================================================================
+class WaveformResult(TypedDict):
+    is_sat: bool
+    max_real: float
+    pair: int
+    params: dict
+    y: object
+    y_imag: object
+    y_real: object
+
+
+class MusicResult(TypedDict):
+    breath_val: float
+    doppler_img: object
+    has_target: bool
+    max_motion: float
+    music_img: object
+    params: dict
+    peak_tap: int
+    target_pos: object
+
+
+class PointCloudResult(TypedDict):
+    """点云类流水线通用返回（POINT-CLOUD* / RA-CFAR）。"""
+    breath_val: float
+    detected_points: list
+    params: dict
+
+
+class RaHeatmapResult(TypedDict):
+    angles_deg: object
+    heatmap: object
+    params: dict
+    ranges_m: object
+
+
+class RAOccupancyResult(TypedDict):
+    angles_deg: object
+    energy: dict
+    h_bg: object
+    h_raw: object
+    heatmap: object
+    params: dict
+    peak_angle_deg: float
+    peak_range_m: float
+    peak_x_m: float
+    peak_y_m: float
+    ranges_m: object
+    xs_cart: object
+    ys_cart: object
+
+
+class AngleSpectrumResult(TypedDict):
+    n_detections: int
+    params: dict
+    power_map: object
+    spectra: object
+
+
+class AngleSpectrumRawResult(TypedDict):
+    angles_deg: object
+    n_range: int
+    params: dict
+    power_map: object
+    spectra: object
 
 class AlgorithmProcessor:
     def __init__(self, config: RadarConfig, data_manager: RadarDataManager):
@@ -235,7 +305,7 @@ class AlgorithmProcessor:
             traceback.print_exc()
             return np.zeros((len(imaging_grid[1]), len(imaging_grid[0]))), 0
 
-    def step_2d_music(self):
+    def step_2d_music(self) -> Optional[MusicResult]:
         # 1. 准备
         self._init_music_if_needed()
         all_c = self.dm.get_all_snapshot_as_array('complex')
@@ -332,7 +402,7 @@ class AlgorithmProcessor:
 
         return {"music_img": trm_image, "doppler_img": heatmap_data, "peak_tap": peak_tap, "has_target": has_target, "target_pos": (smooth_x, smooth_y), "breath_val": val_breath, "max_motion": max_motion, "params": params}
 
-    def step_waveform(self):
+    def step_waveform(self) -> Optional[WaveformResult]:
         params = self.config.algo_params['PLOT']
         tx, rx = params['tx_pair'], params['rx_pair']
         pair = (tx, rx)
@@ -638,7 +708,7 @@ class AlgorithmProcessor:
         # 多峰检测
         return self._find_angle_peaks(spectrum, angles, params)
 
-    def step_point_cloud(self):
+    def step_point_cloud(self) -> Optional[PointCloudResult]:
         """
         点云生成算法：Shape 推导与 CA-CFAR 处理
         """
@@ -723,7 +793,7 @@ class AlgorithmProcessor:
         "breath_val": val_breath,       # <--- 新增：返回呼吸数值
         }
 
-    def step_point_cloud_optimized(self):
+    def step_point_cloud_optimized(self) -> Optional[PointCloudResult]:
         """
         优化版点云算法: 加窗 + DC去除 + leakage roll + 速度/距离门限 + 峰值滤波 + 子网格细化
         AoA 支持 FFT / MUSIC / DBF 三种方式
@@ -861,7 +931,7 @@ class AlgorithmProcessor:
             "breath_val": val_breath,
         }
 
-    def step_angle_spectrum_view(self):
+    def step_angle_spectrum_view(self) -> Optional[AngleSpectrumResult]:
         """
         角度谱调试视图: 与 step_point_cloud_optimized 完全相同的预处理 + CFAR,
         但对每个检出 bin 不做 argmax/寻峰, 而是返回完整的 DBF 角度谱曲线.
@@ -962,7 +1032,7 @@ class AlgorithmProcessor:
             'n_detections': len(spectra),
         }
 
-    def step_angle_spectrum_raw(self):
+    def step_angle_spectrum_raw(self) -> Optional[AngleSpectrumRawResult]:
         """
         Raw DBF angle spectrum for the first few range bins — no CFAR filtering.
 
@@ -1052,7 +1122,7 @@ class AlgorithmProcessor:
             'n_range': len(spectra),
         }
 
-    def step_point_cloud_ra_cfar(self):
+    def step_point_cloud_ra_cfar(self) -> Optional[PointCloudResult]:
         """
         Range-Azimuth Two-Pass CFAR (论文 IEEE JSEN 2024 Algorithm 1):
           1. 计算 DBF Range-Azimuth 热力图
@@ -1157,7 +1227,7 @@ class AlgorithmProcessor:
             "breath_val": float(val_breath),
         }
 
-    def step_ra_heatmap_view(self):
+    def step_ra_heatmap_view(self) -> Optional[RaHeatmapResult]:
         """
         Range-Azimuth 热力图可视化 (Capon):
           与 RA-CFAR 共用参数和 _compute_ra_heatmap, 但不做 CFAR 检测.
@@ -1219,7 +1289,7 @@ class AlgorithmProcessor:
         H_cart = interp(pts).reshape(len(ys), len(xs))
         return H_cart, xs, ys
 
-    def step_ra_occupancy(self):
+    def step_ra_occupancy(self) -> Optional[RAOccupancyResult]:
         """
         RA热力图占用检测流水线 (无 CFAR, 无点云):
           1. 计算 Capon RA 热力图 H (复用 _compute_ra_heatmap)
@@ -1574,7 +1644,7 @@ class AlgorithmProcessor:
 
         return response
 
-    def step_point_cloud_paper(self):
+    def step_point_cloud_paper(self) -> Optional[PointCloudResult]:
         """
         论文 Multipass CFAR 点云算法 (IEEE Sensors Journal 2024),
         适配 IR-UWB: NVE 底噪归一化 + min(L,R) 1D CFAR + Zoom-in
@@ -2206,7 +2276,7 @@ class AlgorithmProcessor:
 
         return result  # List[float]
 
-    def step_point_cloud_dubhe(self):
+    def step_point_cloud_dubhe(self) -> Optional[PointCloudResult]:
         """
         Dubhe CPD 风格点云算法 (2D only):
         相干积累 → ring buffer → leakage roll → Chebyshev 窗 → DC 去除 → Doppler FFT
