@@ -1,12 +1,14 @@
-﻿"""数据源：LiveRadarSource / FilePlaybackSource。
+"""数据源：LiveRadarSource / FilePlaybackSource。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
+阶段 3 新增 BaseSource 抽象：契约固化，App 只依赖抽象接口。
 """
 import json
 import os
 import queue
 import threading
 import time
+from abc import ABC, abstractmethod
 from dataclasses import asdict
 from datetime import datetime
 
@@ -18,10 +20,48 @@ from app.config import RadarConfig
 from app.device_management import deinit_device, init_device
 from app.protocol import ConfigAdapter, RadarProtocol
 
+
+class BaseSource(ABC):
+    """数据源抽象接口（契约，App 依赖它而不是具体类）。
+
+    属性契约（与 App 的鸭子类型一致，勿改名）：
+      - running: bool
+      - data_queue: queue.Queue
+      - measured_fps / playback_fps: float（存在性因实现而异，App 用 getattr 兜底）
+    """
+
+    running: bool
+    data_queue: queue.Queue
+
+    @abstractmethod
+    def start(self):
+        """启动数据源（实时接收或回放），返回是否成功。"""
+
+    @abstractmethod
+    def stop(self):
+        """停止并清理。"""
+
+    @abstractmethod
+    def get_batch_frames(self):
+        """一次性取空当前缓存的所有帧：[(tx, rx, cir_data, raw_frame), ...]"""
+
+    def get_rec_status(self):
+        """录制状态 (is_recording, elapsed_seconds)。"""
+        return False, 0
+
+    def get_progress(self):
+        """进度 0-100（回放用）。"""
+        return 0
+
+    def get_fps(self):
+        """当前帧率。"""
+        return 0.0
+
+
 # ==============================================================================
 # 5. IO Layer
 # ==============================================================================
-class LiveRadarSource:
+class LiveRadarSource(BaseSource):
     def __init__(self, config: RadarConfig):
         self.config = config; self.running = False; self.thread = None
         self.data_queue = queue.Queue(maxsize=5000); self.udp_server = None; self.can_server = None
@@ -94,7 +134,7 @@ class LiveRadarSource:
     def get_rec_status(self): return self.is_recording, (time.time() - self.rec_start_time if self.is_recording else 0)
     def get_progress(self): return 0
 
-class FilePlaybackSource:
+class FilePlaybackSource(BaseSource):
     def __init__(self, config: RadarConfig):
         self.config = config; 
         self.running = False; 

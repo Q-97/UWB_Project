@@ -3,12 +3,12 @@
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
 import os
-import subprocess
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app.config import ANTENNA_LAYOUTS
 from app.gui.dialogs import AlgoSettingsDialog, SeatConfigDialog
+from app.gui.speech import SpeechAnnouncer
 
 class ControlPanel(tk.Frame):
     def __init__(self, parent, config, cbs):
@@ -16,6 +16,7 @@ class ControlPanel(tk.Frame):
         self.config = config
         self.cbs = cbs
         self.pack_propagate(False)
+        self.announcer = SpeechAnnouncer(enabled=config.gui.get('speech_enabled', True))
 
         # --- 标题 ---
         tk.Label(self, text=self.config.gui.get('title', 'Radar V22 (Fixed)'), bg='#f0f0f0', font=('Arial', 12, 'bold')).pack(pady=5)
@@ -423,16 +424,6 @@ class ControlPanel(tk.Frame):
             self.cb_save_dir['values'] = self._recent_dirs
         self.config.data_save_dir = directory
         self._update_cached_record_path_from_filename()
-    def _occ_select_all(self):
-        self._refresh_filename_preview()
-
-    def _occ_clear_all(self):
-        self._refresh_filename_preview()
-
-    def _occ_select_front(self, num_seats):
-        """前排: 前2个座椅选中, 其余清空 (模拟常见的前排有人场景)"""
-        self._refresh_filename_preview()
-
     def _choose_dir(self):
         d = filedialog.askdirectory(initialdir=self.var_save_dir.get() or self.config.data_save_dir)
         if d:
@@ -500,24 +491,7 @@ class ControlPanel(tk.Frame):
             self.lbl_pb.config(text=f"Selected {count} files") # UI 显示数量
 
     def _speak_async(self, text):
-        if not text:
-            return
-        if not self.config.gui.get('speech_enabled', True):
-            return
-        escaped = text.replace("'", "''")
-        cmd = (
-            "Add-Type -AssemblyName System.Speech; "
-            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-            f"$s.Speak('{escaped}')"
-        )
-        try:
-            subprocess.Popen(
-                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-        except Exception as e:
-            print(f"[Speech] 播报失败: {e}")
+        self.announcer.speak_async(text)
 
     def _schedule_record_speech(self, delay_ms, text):
         job = self.after(max(0, int(delay_ms)), lambda: self._speak_async(text))

@@ -1,7 +1,12 @@
 """协议层：标准帧解析（RadarProtocol）与配置桥接（ConfigAdapter）。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
+阶段 3 新增 FrameParser 注册表：为新的下位机帧格式（V2）提供扩展插槽，
+V1 解析路径（RadarProtocol.parse_frame）保持不变。
 """
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
 import numpy as np
 
 # ==============================================================================
@@ -48,4 +53,79 @@ class ConfigAdapter:
         self.CIR_DATA_SIZE = dynamic_config.can_cir_data_size
         self.UCI_SIGNATURE = bytes.fromhex(dynamic_config.can_uci_signature)
         self.PACKET_CNT = dynamic_config.can_packet_cnt
+
+
+# ==============================================================================
+# FrameParser 注册表（阶段 3：协议插件化，为 V2 帧格式预留插槽）
+# ==============================================================================
+@dataclass
+class ParsedFrame:
+    """统一解析结果。"""
+    tx: int
+    rx: int
+    cir: np.ndarray        # complex64, len = FT_LEN
+    raw: bytes = b""
+
+
+class FrameParser(ABC):
+    """协议解析器抽象：新协议（如 V2 帧格式）实现后 register_parser 即可。"""
+
+    name: str = "base"
+
+    @property
+    @abstractmethod
+    def frame_len(self) -> int:
+        """该协议的单帧字节长（供数据源定长切帧）。"""
+
+    @abstractmethod
+    def can_parse(self, frame: bytes) -> bool:
+        """是否能解析该帧（建议只查魔数/版本字段）。"""
+
+    @abstractmethod
+    def parse(self, frame: bytes) -> ParsedFrame:
+        """解析一帧，非法时抛异常。"""
+
+
+class UwbV1Parser(FrameParser):
+    """现有 V1 标准帧：START(4B) + TX(1B) + RX(1B) + CIR + STOP(4B)。"""
+
+    name = "uwb_v1"
+
+    @property
+    def frame_len(self) -> int:
+        return RadarProtocol.FRAME_LEN
+
+    def can_parse(self, frame: bytes) -> bool:
+        return len(frame) == self.frame_len and frame.startswith(RadarProtocol.START_SIGN)
+
+    def parse(self, frame: bytes) -> ParsedFrame:
+        result = RadarProtocol.parse_frame(frame)
+        if result is None:
+            raise ValueError("invalid V1 frame")
+        tx, rx, cir = result
+        return ParsedFrame(tx=tx, rx=rx, cir=cir, raw=bytes(frame))
+
+
+_PARSERS: list = [UwbV1Parser()]
+
+
+def register_parser(parser: FrameParser) -> None:
+    """注册新协议解析器（V2 帧格式定稿后一行注册即可）。"""
+    _PARSERS.append(parser)
+
+
+def get_parsers():
+    """当前已注册的解析器列表（副本）。"""
+    return list(_PARSERS)
+
+
+def parse_frame(frame: bytes):
+    """按注册表顺序尝试解析；全部失败返回 None（保持旧接口语义）。"""
+    for parser in _PARSERS:
+        if parser.can_parse(frame):
+            try:
+                return parser.parse(frame)
+            except Exception:
+                return None
+    return None
 

@@ -634,7 +634,7 @@ class RadarConfig:
     data_save_dir: str = "./data"
     record_filename: str = "radar_capture.bin"  # <--- [新增] 默认文件名
     record_duration: float = 10.0
-    playback_file_list = []
+    playback_file_list: List[str] = field(default_factory=list)  # 修复：原类级共享可变默认值
     playback_file: str = ""
     playback_duration: float = 15.0  # [新增] 期望的回放总时长（秒）
     export_pc_json: bool = False  # 新增：是否在回放时导出点云 JSON

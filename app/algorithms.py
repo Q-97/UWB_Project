@@ -1827,30 +1827,6 @@ class AlgorithmProcessor:
             "breath_val": val_breath,
         }
 
-    def map_to_2d_grid(self, raw_vec):
-        """
-        将原始 8 通道数据映射到 2x5 虚拟面阵网格
-        raw_vec 顺序: [T0T0, T0T1, T0R0, T0R1, T1T0, T1T1, T1R0, T1R1]
-        """
-        # 初始化 2x5 的复数矩阵
-        grid = np.zeros((2, 5), dtype=complex)
-        
-        # 冗余点处理：T0-T1 (idx 1) 和 T1-T0 (idx 4) 物理位置重合
-        redundant_avg = (raw_vec[1] + raw_vec[4]) / 2.0
-        
-        # 填充 Row 0 (Y=0, 上排)
-        grid[0, 0] = raw_vec[0]          # T0-T0 (0,0)
-        grid[0, 2] = redundant_avg       # (1.0, 0)
-        grid[0, 4] = raw_vec[5]          # T1-T1 (2.0, 0)
-        
-        # 填充 Row 1 (Y=-0.5, 下排)
-        grid[1, 0] = raw_vec[2]          # T0-R0 (0, -0.5)
-        grid[1, 1] = raw_vec[3]          # T0-R1 (0.5, -0.5)
-        grid[1, 2] = raw_vec[6]          # T1-R0 (1.0, -0.5)
-        grid[1, 3] = raw_vec[7]          # T1-R1 (1.5, -0.5)
-        
-        return grid
-
     # ===== DBF & CFAR helpers (shared by OPTIMIZED and DUBHE) =====
 
     def _subbin_refine(self, power_map, r_idx, d_idx):
