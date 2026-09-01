@@ -1,7 +1,9 @@
-﻿"""对话框：AlgoSettingsDialog / SeatConfigDialog。
+"""对话框：AlgoSettingsDialog / SeatConfigDialog。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
+import json
+
 import tkinter as tk
 from tkinter import ttk
 

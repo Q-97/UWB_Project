@@ -1,4 +1,4 @@
-﻿"""编排层：App（原 gui_main.py 的上帝类，阶段 1 整体搬迁，阶段 3.4 瘦身）。
+"""编排层：App（原 gui_main.py 的上帝类，阶段 1 整体搬迁，阶段 3.4 瘦身）。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
@@ -21,9 +21,10 @@ from app.sources import FilePlaybackSource, LiveRadarSource
 
 class App:
     def __init__(self, root):
-        self.root = root; self.root.geometry(self.config.gui.get('window_size', '1300x850')); self.config = RadarConfig(); self.config.load_layout("2x4_Default")
+        self.root = root
+        self.config = RadarConfig(); self.config.load_layout("2x4_Default")
         load_config(self.config)  # 持久化: 用已保存的配置覆盖默认值
-        self.root.geometry(self.config.gui.get('window_size', '1300x850'))  # 载入配置后生效
+        self.root.geometry(self.config.gui.get('window_size', '1300x850'))
         if not os.path.exists(self.config.data_save_dir): os.makedirs(self.config.data_save_dir)
         self.data_manager = RadarDataManager(self.config); self.algo_processor = AlgorithmProcessor(self.config, self.data_manager)
         self.source = None; self.running = False
