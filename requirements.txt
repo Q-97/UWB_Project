@@ -1,0 +1,15 @@
+# 运行 GUI 所需
+numpy
+scipy
+matplotlib
+pyserial
+
+# 可选：OA/BD 模型推理（model/*.tflite）
+# tensorflow        # 或 tflite-runtime
+
+# 可选：experiments/ 离线训练（PyTorch）
+# torch
+# pandas            # torch_MxTx2_TMLP.py 汇总表格用
+
+# 可选：可视化动图（MxTx2_error_vis_dync.py）
+# pillow

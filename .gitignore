@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+model/
+data/
+*.txt
+!requirements.txt
+.idea/
+.vscode/
+.claude/
+# 论文提取文本（原 pdf_output/，现并入 docs/references/）
+docs/references/
+# 不必要的驱动安装包/跨平台库（保留本地磁盘，不上传）
+kerneldlls/
+libs/windows/x86_64/vc_redist.x64.exe
+libs/windows/x86_32/vc_redist.x86.exe
+libs/windows/x86_64/vcredist_x64.exe
+libs/windows/x86_32/vcredist_x86.exe
+libs/android/
+libs/mac_os/
+libs/linux/
