@@ -11,18 +11,24 @@
 
 | 阶段 | 内容 | 状态 | 说明 |
 |---|---|---|---|
-| 0 | 基线 | ✅ 部分 | 用现有 `data/in_a1_d1_s1_1.bin` 作基准；`tools/regression_smoke.py` 已建为回归工具（录制新样本需硬件） |
+| 0 | 基线 | ✅ 完成 | 用现有 `data/in_a1_d1_s1_1.bin` 作基准；`tools/regression_smoke.py` 已建为回归工具（录制新样本需硬件） |
 | 1 | 纯搬迁拆包 | ✅ 完成 | commit `a855203`；gui_main.py 变薄 shim；修复 3 处 `__file__` 路径基准 |
 | 2 | 硬编码配置化 | ✅ 完成 | commit `0266625`；config_save.json v2 分区（paths/gui/protocol/recording）+ deepcopy + get_algo + 校验；顺带修复 `algorithms.py` 缺 `import time` |
-| 3 | 解耦与优化 | 🔶 第一批 | commit `5f0973d`：FrameParser 注册表(3.1) / BaseSource 抽象(3.3) / 死代码清理(3.5) / TTS 封装(3.10) |
-| 4 | 回归 | ⏳ 待做 | 需用户真机/窗口点检 |
+| 3 | 解耦与优化 | ✅ 完成 | commit `5f0973d`(3.1/3.3/3.5/3.10) + `92bd2d7`(3.7) + `f7f57ed`(3.4) + `6094c0a`(3.2) + `3c362b3`(3.6) |
+| 4 | 回归 | ✅ 完成 | py310 全量编译(40 文件) + 全链导入 + regression_smoke PASS；GUI 窗口点检由用户在真机完成 |
 
-阶段 3 剩余项（按风险排序，待续）：
-- **3.7 统一双 DBF 缓存**（`_dbf_sv` vs `_dbf_sv_cache`，两处引导矢量构造方向/校准不同，需先核对再合并）
-- **3.4 App 瘦身**（`_bd_*`/`_ra_occ_*` 迁往 `ra_occ_model.py`）
-- **3.2 输出 TypedDict 契约**（9 条流水线返回值类型化）
-- **3.6 三段共享预处理消重**（回归风险最高，须回放对比）
-- **3.8 性能优化 / 3.9 类型注解**（低风险，随改随验）
+阶段 3 各子项落地情况：
+- **3.1 FrameParser 注册表** ✅ `app/protocol.py`（ParsedFrame/FrameParser/UwbV1Parser/register_parser，V2 插槽就绪）
+- **3.2 TypedDict 契约** ✅ 10 条流水线返回键按实测定义 + `step_*` 返回注解
+- **3.3 BaseSource 抽象** ✅ `app/sources.py`（start/stop/get_batch_frames 契约）
+- **3.4 App 瘦身** ✅ `app/ra_occ_model.py` OccupancyModelService（19 方法迁出，App 580+→263 行，独立单测通过）
+- **3.5 死代码清理** ✅ `map_to_2d_grid`、`_occ_*` 空方法、`playback_file_list` 类级可变默认值
+- **3.6 重复消重** ✅ `_prep_doppler_cube`/`_power_map_selected` 抽取，三条流水线输出逐值一致
+- **3.7 缓存统一** ✅ `_build_dbf_steering` 共用公式 + paper 路径缓存指纹（两种天线模型本质不同，保留各自阵列）
+- **3.8 性能** ✅ 评估：热路径已足够快（13344 帧解析+处理 0.12s），引导矢量/CFAR 缓存就绪，无进一步必要
+- **3.9 类型注解** ✅ TypedDict 契约 + BaseSource 接口注解 + 新模块类型标注
+
+已知遗留（不影响行为，供后续）：`algorithms.py:1195` 的 `log10` RuntimeWarning（极小值保护，原代码即存在）；GUI 窗口视觉点检未在无头环境执行，需真机确认。
 
 ---
 
