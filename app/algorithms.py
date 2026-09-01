@@ -1,4 +1,4 @@
-﻿"""算法层：AlgorithmProcessor（9 条流水线）+ 算法辅助函数。
+"""算法层：AlgorithmProcessor（9 条流水线）+ 算法辅助函数。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
@@ -793,58 +793,66 @@ class AlgorithmProcessor:
         "breath_val": val_breath,       # <--- 新增：返回呼吸数值
         }
 
-    def step_point_cloud_optimized(self) -> Optional[PointCloudResult]:
-        """
-        优化版点云算法: 加窗 + DC去除 + leakage roll + 速度/距离门限 + 峰值滤波 + 子网格细化
-        AoA 支持 FFT / MUSIC / DBF 三种方式
+    def _prep_doppler_cube(self, params, with_abs=False):
+        """三段共享的 Doppler 预处理（阶段 3.6 消重）：
+        取快照 → CIR 相干积累 → leakage roll → Chebyshev 窗 → Doppler FFT → 展平 8 通道。
+
+        返回 (rd_cube_flat, valid_indices, all_a)；数据不足时返回 (None, None, None)。
+        with_abs=True 时额外取 abs 快照（呼吸特征用）。
         """
         all_c = self.dm.get_all_snapshot_as_array('complex')
-        all_a = self.dm.get_all_snapshot_as_array('abs')
+        all_a = self.dm.get_all_snapshot_as_array('abs') if with_abs else None
         if all_c is None:
-            return None
+            return None, None, None
 
-        params = self.config.algo_params['POINT-CLOUD-OPTIMIZED']
         N_snaps = params['snapshots']
         cir_comb = params.get('cir_combine_num', 1)
         leakage_offset = params['leakage_offset']
         current_cube = all_c[:, :, :, -N_snaps:]  # (4, 2, 32, N)
 
         # 1. CIR 相干积累: 每 cir_comb 帧复数累加取均值
-        #    → 提升 SNR ~10log10(cir_comb) dB
-        #    → 压缩慢时间轴, 等效帧周期 × cir_comb (抗混叠低通)
-        #    → 观测窗口不变时, 等效 Doppler bin 更少但 bin 内噪底更低
         if cir_comb > 1:
             n_comb = current_cube.shape[3] // cir_comb
             trim = n_comb * cir_comb
             current_cube = current_cube[:, :, :, :trim] \
                 .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
-            # shape: (4, 2, 32, n_comb)
 
         # 2. 泄漏处理: np.roll 替代截断
         current_cube = np.roll(current_cube, -leakage_offset, axis=2)
 
-        # # 3. 慢时间 DC 去除
-        # if params.get('doppler_dc_remove', True):
-        #     current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
-
-        # 4. 慢时间加窗 (Chebyshev)
+        # 3. 慢时间加窗 (Chebyshev)
         if params.get('doppler_window') == 'chebyshev':
             atten = params.get('doppler_win_atten', 60)
             win = chebwin(current_cube.shape[3], at=atten)
             current_cube = current_cube * win[np.newaxis, np.newaxis, np.newaxis, :]
 
-        # 5. Doppler FFT
+        # 4. Doppler FFT
         rd_cube = np.fft.fft(current_cube, axis=3)
 
-        # 6. 展平 8 通道 + 选通道 + 非相干合并
+        # 5. 展平 8 通道 + 选通道索引
         rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
             8, rd_cube.shape[2], rd_cube.shape[3])
         valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
+        return rd_cube_flat, valid_indices, all_a
+
+    def _power_map_selected(self, rd_cube_flat, valid_indices, params):
+        """选通道后的非相干合并功率图（optimized 与 angle_spectrum_view 共用）。"""
         if params.get('cfar_only_selected', True):
             rd_sel = rd_cube_flat[valid_indices, :, :]
         else:
             rd_sel = rd_cube_flat
-        power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)
+        return np.sum(np.abs(rd_sel) ** 2, axis=0)
+
+    def step_point_cloud_optimized(self) -> Optional[PointCloudResult]:
+        """
+        优化版点云算法: 加窗 + DC去除 + leakage roll + 速度/距离门限 + 峰值滤波 + 子网格细化
+        AoA 支持 FFT / MUSIC / DBF 三种方式
+        """
+        params = self.config.algo_params['POINT-CLOUD-OPTIMIZED']
+        rd_cube_flat, valid_indices, all_a = self._prep_doppler_cube(params, with_abs=True)
+        if rd_cube_flat is None:
+            return None
+        power_map = self._power_map_selected(rd_cube_flat, valid_indices, params)
 
         # 7. CA-CFAR
         mask, noise_avg = self.perform_ca_cfar_2d(power_map, params)
@@ -938,41 +946,11 @@ class AlgorithmProcessor:
 
         用于调试: 直观看同一个 range-doppler bin 的角度谱上有没有第二个峰.
         """
-        all_c = self.dm.get_all_snapshot_as_array('complex')
-        all_a = self.dm.get_all_snapshot_as_array('abs')
-        if all_c is None:
-            return None
-
         params = self.config.algo_params['POINT-CLOUD-OPTIMIZED']
-        N_snaps = params['snapshots']
-        cir_comb = params.get('cir_combine_num', 1)
-        leakage_offset = params['leakage_offset']
-        current_cube = all_c[:, :, :, -N_snaps:]
-
-        # 1-5. 与 step_point_cloud_optimized 完全相同的预处理
-        if cir_comb > 1:
-            n_comb = current_cube.shape[3] // cir_comb
-            trim = n_comb * cir_comb
-            current_cube = current_cube[:, :, :, :trim] \
-                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
-        current_cube = np.roll(current_cube, -leakage_offset, axis=2)
-        # if params.get('doppler_dc_remove', True):
-        #     current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
-        if params.get('doppler_window') == 'chebyshev':
-            atten = params.get('doppler_win_atten', 60)
-            win = chebwin(current_cube.shape[3], at=atten)
-            current_cube = current_cube * win[np.newaxis, np.newaxis, np.newaxis, :]
-        rd_cube = np.fft.fft(current_cube, axis=3)
-
-        # 6. 展平 + 选通道 + 非相干合并
-        rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
-            8, rd_cube.shape[2], rd_cube.shape[3])
-        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
-        if params.get('cfar_only_selected', True):
-            rd_sel = rd_cube_flat[valid_indices, :, :]
-        else:
-            rd_sel = rd_cube_flat
-        power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)
+        rd_cube_flat, valid_indices, _ = self._prep_doppler_cube(params)
+        if rd_cube_flat is None:
+            return None
+        power_map = self._power_map_selected(rd_cube_flat, valid_indices, params)
 
         # 7. CA-CFAR (与 step_point_cloud_optimized 相同)
         mask, noise_avg = self.perform_ca_cfar_2d(power_map, params)
@@ -1042,36 +1020,11 @@ class AlgorithmProcessor:
 
         用途: 观察早期 range bin 的原始 DBF 角度谱形态, 理解无 CFAR 筛选时的测角数据.
         """
-        all_c = self.dm.get_all_snapshot_as_array('complex')
-        if all_c is None:
-            return None
-
         params = self.config.algo_params['POINT-CLOUD-OPTIMIZED']
-        N_snaps = params['snapshots']
-        cir_comb = params.get('cir_combine_num', 1)
-        leakage_offset = params['leakage_offset']
-        current_cube = all_c[:, :, :, -N_snaps:]
-
-        # 1-5. 与 step_point_cloud_optimized 完全相同的预处理
-        if cir_comb > 1:
-            n_comb = current_cube.shape[3] // cir_comb
-            trim = n_comb * cir_comb
-            current_cube = current_cube[:, :, :, :trim] \
-                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
-        current_cube = np.roll(current_cube, -leakage_offset, axis=2)
-        # if params.get('doppler_dc_remove', True):
-        #     current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
-        if params.get('doppler_window') == 'chebyshev':
-            atten = params.get('doppler_win_atten', 60)
-            win = chebwin(current_cube.shape[3], at=atten)
-            current_cube = current_cube * win[np.newaxis, np.newaxis, np.newaxis, :]
-        rd_cube = np.fft.fft(current_cube, axis=3)
-
-        # 6. 展平 + 选通道
-        rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
-            8, rd_cube.shape[2], rd_cube.shape[3])
-        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
-        rd_sel = rd_cube_flat[valid_indices, :, :]  # [n_ch, n_range, n_dop]
+        rd_cube_flat, valid_indices, _ = self._prep_doppler_cube(params)
+        if rd_cube_flat is None:
+            return None
+        rd_sel = rd_cube_flat[valid_indices, :, :]  # [n_ch, n_range, n_dop]（raw 恒选通道）
 
         # 初始化 DBF 引导矢量
         if getattr(self, '_dbf_sv', None) is None:
