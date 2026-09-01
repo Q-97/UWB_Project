@@ -1,5 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
-model/
-data/
-*.txt
+.idea/
+.DS_Store

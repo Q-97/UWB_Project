@@ -24,6 +24,7 @@ from device_management import *
 from CAN_data_listen import CANFrameServer, radar_hardware_init
 # --- External Modules ---
 from UDP_data_listen import UDPFrameServer
+from frame_sync import FrameSyncBuffer   # 串口字节流分帧器
 import util 
 try:
     from breathe import find_breathing_feature
@@ -140,8 +141,10 @@ ANTENNA_LAYOUTS = {
     "2x4_Default": {
         "tx": [[-0.019, 0, 0.0], [0.019, 0, 0.0]],
         "rx": [[-0.019, 0, 0.0], [0.019, 0, 0.0], [-0.019, 0.0, -0.02], [0.0, 0.0, -0.02]],
-        "tx_list": [1, 2], "rx_list": [4, 5, 6, 7],
-        "tx_num": 2, "rx_num": 4, "rx_start": 4
+        "tx_list": [2], "rx_list": [4, 5, 6, 7],
+        "tx_num": 1, "rx_num": 4, "rx_start": 4,
+        "virt_ant_x": [0.0, 0.038, 0.0, 0.019],
+        "indices_azimuth": [0, 1, 2, 3]
     },
     "4x4_Demo": {
         "tx": [[-0.03,0,0], [-0.01,0,0], [0.01,0,0], [0.03,0,0]],
@@ -546,7 +549,8 @@ class RadarProtocol:
     def parse_frame(frame_bytes: bytes):
         if len(frame_bytes) != RadarProtocol.FRAME_LEN: return None
         if not frame_bytes.startswith(RadarProtocol.START_SIGN): return None
-        tx = frame_bytes[RadarProtocol.HEADER_LEN]; rx = frame_bytes[RadarProtocol.HEADER_LEN+1]
+        tx = frame_bytes[RadarProtocol.HEADER_LEN];
+        rx = frame_bytes[RadarProtocol.HEADER_LEN+1]
         cir = frame_bytes[RadarProtocol.HEADER_LEN+2 : -RadarProtocol.FOOTER_LEN]
         s16 = np.frombuffer(cir, dtype=np.int16)
         c_data = s16[0::2].astype(np.float32) + 1j * s16[1::2].astype(np.float32)
@@ -616,6 +620,8 @@ class RadarConfig:
     playback_duration: float = 15.0  # [新增] 期望的回放总时长（秒）
     export_pc_json: bool = False  # 新增：是否在回放时导出点云 JSON
     recent_save_dirs: List[str] = field(default_factory=lambda: ["./data"])
+    virt_ant_x: Optional[List[float]] = None       # [D4] 虚拟天线 x 坐标（随布局加载）
+    layout_indices: Optional[List[int]] = None     # [D4] 方位角通道索引（随布局加载）
     def load_layout(self, name):
         if name in ANTENNA_LAYOUTS:
             self.current_layout_name = name
@@ -624,6 +630,8 @@ class RadarConfig:
             self.udp_tx_list = L['tx_list']; self.udp_rx_list = L['rx_list']
             self.num_tx_antennas = L['tx_num']; self.num_rx_antennas = L['rx_num']
             self.rx_antenna_start_num = L['rx_start']
+            self.virt_ant_x = L.get('virt_ant_x', None)
+            self.layout_indices = L.get('indices_azimuth', None)
 
     # --- 统一的网格定义 (X, Y) ---
     @property
@@ -1293,12 +1301,16 @@ class AlgorithmProcessor:
             channels: 对应的原始 8 通道索引列表
         """
         wavelength = 2.99792458e8 / params.get('center_freq', 7.9872e9)
-        # 8 通道虚拟天线 x 坐标 (m), 与 _init_dbf_steering 中的 all_virt_x 一致
-        # 通道顺序: [TX1-RX4, TX1-RX5, TX1-RX6, TX1-RX7,
-        #            TX2-RX4, TX2-RX5, TX2-RX6, TX2-RX7]
-        all_virt_x = np.array([-0.038, 0.0, -0.038, -0.019, 0.0, 0.038, 0.0, 0.019])
-        channels = params.get('indices_azimuth', [2, 3, 6, 7])
-        ant_x = all_virt_x[channels] / wavelength  # 归一化到波长
+        # 虚拟天线 x 坐标 (m)：优先用布局配置（随板子走），否则默认 8 通道
+        virt_x = getattr(self.config, 'virt_ant_x', None)
+        if virt_x is None:
+            virt_x = np.array([-0.038, 0.0, -0.038, -0.019, 0.0, 0.038, 0.0, 0.019])
+        else:
+            virt_x = np.array(virt_x)
+        channels = getattr(self.config, 'layout_indices', None)
+        if channels is None:
+            channels = params.get('indices_azimuth', list(range(len(virt_x))))
+        ant_x = virt_x[channels] / wavelength  # 归一化到波长
         return ant_x, channels
 
     def calculate_capon_aoa(self, phase_vec, params):
@@ -2658,21 +2670,28 @@ class AlgorithmProcessor:
         leakage_offset = params['leakage_offset']
         current_cube = all_c[:, :, :, -N_snaps:]
 
+        num_rx = current_cube.shape[0]
+        num_tx = current_cube.shape[1]
+        num_chan = num_rx * num_tx
+
         # 预处理
         if cir_comb > 1:
             n_comb = current_cube.shape[3] // cir_comb
             trim = n_comb * cir_comb
             current_cube = current_cube[:, :, :32, :trim] \
-                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
+                .reshape(num_rx, num_tx, 32, n_comb, cir_comb).mean(axis=4)
         current_cube, range_bin_start = apply_range_bin_selection(
             current_cube, params, return_start_bin=True)
 
-        # 展平 8 通道 → 选 4 通道
-        # current_cube: (4 RX, 2 TX, 32 range, L chirps)
+        # 展平全部通道 → 按 indices_azimuth 选取
+        # current_cube: (num_rx, num_tx, 32 range, L chirps)
         cube_flat = current_cube.transpose(1, 0, 2, 3).reshape(
-            8, current_cube.shape[2], current_cube.shape[3])
-        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
-        A_all = cube_flat[valid_indices, :, :]  # (4, 32, L)
+            num_chan, current_cube.shape[2], current_cube.shape[3])
+        valid_indices = getattr(self.config, 'layout_indices', None)
+        if valid_indices is None:
+            valid_indices = params.get('indices_azimuth',
+                                       list(range(num_chan)))
+        A_all = cube_flat[valid_indices, :, :]  # (len(valid_indices), 32, L)
 
         # 初始化 Capon 导向矢量 (用真实天线位置, 非 ULA 假设)
         if getattr(self, '_capon_sv', None) is None:
@@ -3335,8 +3354,13 @@ class LiveRadarSource:
         self.data_queue = queue.Queue(maxsize=5000); self.udp_server = None; self.can_server = None
         self.is_recording = False; self.record_file = None; self.record_lock = threading.Lock()
         self.rec_start_time = 0; self.rec_duration_target = 0; self.measured_fps = 0.0; self.last_fps_time = time.time(); self.frame_count_sec = 0
+        self._frame_sync = FrameSyncBuffer(RadarProtocol.START_SIGN, RadarProtocol.FRAME_LEN)  # 串口字节流分帧器
+        self._serial_pending = []   # 一次读出多帧时，暂存多余的完整帧
     def start(self):
         self.running = True; RadarProtocol.update_protocol(self.config.ft_len)
+        # 帧长随 ft_len 变化，重建分帧器确保帧长与协议一致
+        self._frame_sync = FrameSyncBuffer(RadarProtocol.START_SIGN, RadarProtocol.FRAME_LEN)
+        self._serial_pending = []
         if self.config.connection_mode in ('UDP', 'BD_UDP'):
             self.udp_server = UDPFrameServer(ConfigAdapter(self.config)); self.udp_server.start()
         elif self.config.connection_mode in ('CAN', 'BD_CAN'):
@@ -3371,6 +3395,20 @@ class LiveRadarSource:
                 try: m = json.load(open(self.record_file.name+".meta")); m['actual_fps'] = self.measured_fps; json.dump(m, open(self.record_file.name+".meta",'w'), indent=4)
                 except: pass
                 self.is_recording = False; self.record_file.close(); self.record_file = None
+    def _pull_serial_frame(self, ser) -> bytes:
+        """读串口字节流，通过 FrameSyncBuffer 返回恰好一帧（或 b''）。
+
+        一次读出的多帧会暂存在 _serial_pending 中逐轮返回，不丢帧；
+        chunk 为空时仍会消化分帧器缓冲中的积压帧。
+        """
+        if self._serial_pending:
+            return self._serial_pending.pop(0)
+        chunk = ser.read(ser.in_waiting) if ser.in_waiting else b''
+        frames = self._frame_sync.feed(chunk)
+        if len(frames) > 1:
+            self._serial_pending.extend(frames[1:])
+        return frames[0] if frames else b''
+
     def _io_loop(self):
         ser = None
         if self.config.connection_mode == 'SERIAL': 
@@ -3384,7 +3422,7 @@ class LiveRadarSource:
             try:
                 if self.config.connection_mode in ('UDP', 'BD_UDP'): f = self.udp_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
                 elif self.config.connection_mode in ('CAN', 'BD_CAN'): f = self.can_server.get_frame(); raw_chunk = f if f else b''; time.sleep(0.002) if not f else None
-                elif self.config.connection_mode == 'SERIAL': raw_chunk = ser.read(ser.in_waiting) if ser.in_waiting else b''; time.sleep(0.002) if not raw_chunk else None
+                elif self.config.connection_mode == 'SERIAL': raw_chunk = self._pull_serial_frame(ser); time.sleep(0.002) if not raw_chunk else None
             except: pass
             if not raw_chunk: continue
             if self.is_recording and self.record_file: self.record_file.write(raw_chunk)
