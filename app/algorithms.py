@@ -1,7 +1,8 @@
-﻿"""算法层：AlgorithmProcessor（9 条流水线）+ 算法辅助函数。
+"""算法层：AlgorithmProcessor（9 条流水线）+ 算法辅助函数。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
+import time
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 

@@ -1,4 +1,4 @@
-﻿"""控制面板：ControlPanel。
+"""控制面板：ControlPanel。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
@@ -18,7 +18,7 @@ class ControlPanel(tk.Frame):
         self.pack_propagate(False)
 
         # --- 标题 ---
-        tk.Label(self, text="Radar V22 (Fixed)", bg='#f0f0f0', font=('Arial', 12, 'bold')).pack(pady=5)
+        tk.Label(self, text=self.config.gui.get('title', 'Radar V22 (Fixed)'), bg='#f0f0f0', font=('Arial', 12, 'bold')).pack(pady=5)
 
         # --- 模式选择 ---
         frm_mode = tk.Frame(self, bg='#f0f0f0')
@@ -84,7 +84,7 @@ class ControlPanel(tk.Frame):
         self.var_record_pose = tk.StringVar(value="s1")
         self.var_out_actions = tk.StringVar(value="")
         self.var_out_pos_count = tk.StringVar(value="1")
-        self.var_out_action_time = tk.StringVar(value="10")
+        self.var_out_action_time = tk.StringVar(value=str(self.config.recording.get('default_action_time', 10)))
 
         row_io = tk.Frame(frm_rec, bg='#f0f0f0')
         row_io.pack(fill='x', padx=2, pady=(5, 2))
@@ -343,15 +343,18 @@ class ControlPanel(tk.Frame):
 
     # ===== 录制文件名自动生成辅助方法 =====
     def _gen_base_filename(self):
-        """根据采样标签生成基础文件名."""
+        """根据采样标签生成基础文件名（模板来自 config.recording，默认值 = 原硬编码逻辑）。"""
+        rec = self.config.recording
         person_id = ''.join(ch for ch in self.var_person_id.get().strip() if ch.isalnum())
         if not person_id:
-            person_id = "a1"
+            person_id = rec.get('default_person_id', 'a1')
         if self.var_io_mode.get() == 'out':
-            return f"out_{person_id}_1.bin"
-        area_pos = f"{self.var_record_area.get()}{self.var_record_pos.get()}"
+            return rec.get('out_template', 'out_{person}_{seq}.bin').format(person=person_id, seq=1)
+        area = self.var_record_area.get()
+        pos = self.var_record_pos.get()
         pose = self.var_record_pose.get()
-        return f"in_{person_id}_{area_pos}_{pose}_1.bin"
+        return rec.get('in_template', 'in_{person}_{area}{position}_{pose}_{seq}.bin').format(
+            person=person_id, area=area, position=pos, pose=pose, seq=1)
 
     def _normalize_record_filename(self, filename):
         filename = filename.strip()
@@ -376,8 +379,9 @@ class ControlPanel(tk.Frame):
                 prefix = maybe_prefix
                 start_index = max(1, int(maybe_index))
         n = start_index
+        suffix_tpl = self.config.recording.get('rename_suffix', '_{n}')
         while True:
-            new_name = f"{prefix}_{n}{ext}"
+            new_name = f"{prefix}{suffix_tpl.format(n=n)}{ext}"
             candidate = os.path.join(directory, new_name)
             if not os.path.exists(candidate):
                 return candidate, new_name
@@ -498,6 +502,8 @@ class ControlPanel(tk.Frame):
     def _speak_async(self, text):
         if not text:
             return
+        if not self.config.gui.get('speech_enabled', True):
+            return
         escaped = text.replace("'", "''")
         cmd = (
             "Add-Type -AssemblyName System.Speech; "
@@ -526,8 +532,9 @@ class ControlPanel(tk.Frame):
         self._record_speech_jobs = []
 
     def _start_record_speech(self, duration):
+        texts = self.config.gui.get('speech_texts', {})
         self._clear_record_speech()
-        self._schedule_record_speech(0, "开始采样")
+        self._schedule_record_speech(0, texts.get('start', '开始采样'))
         if self.var_io_mode.get() == 'out':
             actions = self._parse_out_actions()
             action_time = self._get_out_action_time()
@@ -543,7 +550,7 @@ class ControlPanel(tk.Frame):
                     else:
                         self._schedule_record_speech(elapsed * 1000, action)
         if duration > 0:
-            self._schedule_record_speech(duration * 1000, "结束采样")
+            self._schedule_record_speech(duration * 1000, texts.get('stop', '结束采样'))
 
     def _rec(self):
         if not self.recording_state:
@@ -586,7 +593,7 @@ class ControlPanel(tk.Frame):
             # --- 停止录制 ---
             self.cbs['rec_stop']()
             self._clear_record_speech()
-            self._speak_async("结束采样")
+            self._speak_async(self.config.gui.get('speech_texts', {}).get('stop', '结束采样'))
             self.recording_state = False
             self.btn_rec.config(bg='#ddd', text="Start Recording")
             self._refresh_filename_preview()

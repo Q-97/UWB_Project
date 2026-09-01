@@ -1,4 +1,4 @@
-﻿"""绘图面板：PlotPanel（11 种显示模式）。
+"""绘图面板：PlotPanel（11 种显示模式）。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
@@ -21,6 +21,21 @@ class PlotPanel(tk.Frame):
         self.pc_history = []  # 用于存储当前活跃的点云缓存
         self.ra_occ_peak_history = deque(maxlen=5)
         self.ra_occ_oa_filter_history = deque(maxlen=5)
+        self.gui_colors = {}  # 主题颜色（阶段 2：由 config.gui.colors 注入）
+
+    def set_theme(self, colors):
+        """注入 GUI 主题颜色（config.gui.colors），缺省回落现状硬编码值。"""
+        self.gui_colors = colors or {}
+
+    def _state_colors(self):
+        """三态状态格颜色: 0=empty, 1=child, 2=adult（可配置）。"""
+        c = self.gui_colors.get('state', {})
+        return {0: c.get('empty', 'green'), 1: c.get('child', 'gold'), 2: c.get('adult', 'red')}
+
+    def _seat_colors(self):
+        """座椅椭圆三态颜色（可配置）。"""
+        c = self.gui_colors.get('seat', {})
+        return {'empty': c.get('empty', 'green'), 'child': c.get('child', 'gold'), 'adult': c.get('adult', 'red')}
     def init_layout(self, mode, params):
         self.figure.clf(); self.axes = {}; self.plots = {}
         self.ra_occ_peak_history.clear()
@@ -543,7 +558,7 @@ class PlotPanel(tk.Frame):
 
             # === 右: 田字格状态面板 (原地更新色块+文字, 不复绘) ===
             state = data.get('state', {})  # 0=empty, 1=child, 2=adult
-            state_colors = {0: 'green', 1: 'gold', 2: 'red'}
+            state_colors = self._state_colors()
             state_labels = {0: 'empty', 1: 'child', 2: 'ADULT'}
 
             for name, cell in self.plots.get('ra_occ_tian', {}).items():
@@ -758,14 +773,15 @@ class PlotPanel(tk.Frame):
         成人椭圆始终为实线, 小孩椭圆始终为虚线."""
         # 兼容旧的 _seat_patches 属性 (其他模式如 POINT-CLOUD)
         if hasattr(self, '_seat_patches') and self._seat_patches:
+            sc = self._seat_colors()
             for name, patch in self._seat_patches.items():
                 occ = occupancy.get(name, 0) if isinstance(occupancy, dict) else 0
                 if occ == 2:
-                    color, lw = 'red', 3.0
+                    color, lw = sc['adult'], 3.0
                 elif occ == 1:
-                    color, lw = 'gold', 2.5
+                    color, lw = sc['child'], 2.5
                 else:
-                    color, lw = 'green', 2.0
+                    color, lw = sc['empty'], 2.0
                 patch.set_edgecolor(color)
                 patch.set_linewidth(lw)
                 if name in self._seat_texts:
@@ -775,30 +791,31 @@ class PlotPanel(tk.Frame):
         # 新的双椭圆模式
         if not hasattr(self, '_seat_adult_patches') or not self._seat_adult_patches:
             return
+        sc = self._seat_colors()
         for name, a_patch in self._seat_adult_patches.items():
             occ = occupancy.get(name, 0) if isinstance(occupancy, dict) else 0
             c_patch = self._seat_child_patches.get(name) if hasattr(self, '_seat_child_patches') else None
 
             if occ == 2:          # 成人: 成人圈红粗, 小孩圈灰细
-                a_patch.set_edgecolor('red')
+                a_patch.set_edgecolor(sc['adult'])
                 a_patch.set_linewidth(3.0)
                 if c_patch:
                     c_patch.set_edgecolor('#cccccc')
                     c_patch.set_linewidth(1.0)
             elif occ == 1:        # 儿童: 成人圈绿, 小孩圈金
-                a_patch.set_edgecolor('green')
+                a_patch.set_edgecolor(sc['empty'])
                 a_patch.set_linewidth(2.0)
                 if c_patch:
-                    c_patch.set_edgecolor('gold')
+                    c_patch.set_edgecolor(sc['child'])
                     c_patch.set_linewidth(2.0)
             else:                 # 空闲: 两圈皆绿
-                a_patch.set_edgecolor('green')
+                a_patch.set_edgecolor(sc['empty'])
                 a_patch.set_linewidth(2.0)
                 if c_patch:
-                    c_patch.set_edgecolor('green')
+                    c_patch.set_edgecolor(sc['empty'])
                     c_patch.set_linewidth(1.5)
 
             if name in self._seat_texts:
                 self._seat_texts[name].set_color(
-                    'red' if occ == 2 else ('gold' if occ == 1 else 'green'))
+                    sc['adult'] if occ == 2 else (sc['child'] if occ == 1 else sc['empty']))
 

@@ -1,4 +1,4 @@
-﻿"""编排层：App（原 gui_main.py 的上帝类，阶段 1 整体搬迁）。
+"""编排层：App（原 gui_main.py 的上帝类，阶段 1 整体搬迁）。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
@@ -21,8 +21,9 @@ from app.sources import FilePlaybackSource, LiveRadarSource
 
 class App:
     def __init__(self, root):
-        self.root = root; self.root.geometry("1300x850"); self.config = RadarConfig(); self.config.load_layout("2x4_Default")
+        self.root = root; self.root.geometry(self.config.gui.get('window_size', '1300x850')); self.config = RadarConfig(); self.config.load_layout("2x4_Default")
         load_config(self.config)  # 持久化: 用已保存的配置覆盖默认值
+        self.root.geometry(self.config.gui.get('window_size', '1300x850'))  # 载入配置后生效
         if not os.path.exists(self.config.data_save_dir): os.makedirs(self.config.data_save_dir)
         self.data_manager = RadarDataManager(self.config); self.algo_processor = AlgorithmProcessor(self.config, self.data_manager)
         self.source = None; self.running = False
@@ -30,6 +31,7 @@ class App:
         cbs = {'start': self.start, 'stop': self.stop, 'rec_start': self.rec_start, 'rec_stop': self.rec_stop, 'update_layout': self.update_layout}
         self.ctrl = ControlPanel(root, self.config, cbs); self.ctrl.grid(row=0, column=0, sticky='ns')
         self.plot_panel = PlotPanel(root); self.plot_panel.grid(row=0, column=1, sticky='nsew')
+        self.plot_panel.set_theme(self.config.gui.get('colors', {}))
         self.plot_panel.init_layout("PLOT", self.config.algo_params['PLOT'])
         self._ra_occ_snapshot_counter = 0
         self._last_ra_occ_heatmap_snapshot = None
@@ -309,7 +311,8 @@ class App:
 
         sample = np.asarray(sample)
         playback_name = os.path.splitext(os.path.basename(self.config.playback_file))[0]
-        output_dir = os.path.join(PROJECT_ROOT, playback_name)
+        export_root = self.config.paths.get('playback_export_dir') or PROJECT_ROOT
+        output_dir = os.path.join(export_root, playback_name)
         try:
             os.makedirs(output_dir, exist_ok=True)
             while True:
@@ -328,7 +331,7 @@ class App:
 
     def _ra_occ_resolve_model_path(self, model_path):
         if not model_path:
-            model_path = "./model/epoch-25-val-f1-100.0-sp-100.0.tflite"
+            model_path = self.config.paths.get('oa_model') or "./model/epoch-25-val-f1-100.0-sp-100.0.tflite"
         if os.path.isabs(model_path):
             return model_path
         base_dir = PROJECT_ROOT

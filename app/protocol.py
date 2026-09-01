@@ -1,4 +1,4 @@
-﻿"""协议层：标准帧解析（RadarProtocol）与配置桥接（ConfigAdapter）。
+"""协议层：标准帧解析（RadarProtocol）与配置桥接（ConfigAdapter）。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
@@ -13,10 +13,14 @@ class RadarProtocol:
     FT_LEN = 32; CIR_DATA_LEN = 128; FRAME_LEN = 138
 
     @classmethod
-    def update_protocol(cls, ft_len):
+    def update_protocol(cls, ft_len, start_sign=None, stop_sign=None):
         cls.FT_LEN = ft_len
         cls.CIR_DATA_LEN = ft_len * 4
         cls.FRAME_LEN = cls.HEADER_LEN + cls.ANTENNA_INFO_LEN + cls.CIR_DATA_LEN + cls.FOOTER_LEN
+        if start_sign is not None:
+            cls.START_SIGN = start_sign
+        if stop_sign is not None:
+            cls.STOP_SIGN = stop_sign
 
     @staticmethod
     def parse_frame(frame_bytes: bytes):

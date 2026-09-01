@@ -1,5 +1,46 @@
 {
-  "version": 1,
+  "version": 2,
+  "paths": {
+    "model_dir": "./model",
+    "oa_model": "",
+    "data_dir": "./data",
+    "playback_export_dir": ""
+  },
+  "gui": {
+    "title": "Radar V22 (Fixed)",
+    "window_size": "1300x850",
+    "speech_enabled": true,
+    "speech_texts": {
+      "start": "开始采样",
+      "stop": "结束采样"
+    },
+    "colors": {
+      "state": {
+        "empty": "green",
+        "child": "gold",
+        "adult": "red"
+      },
+      "seat": {
+        "empty": "green",
+        "child": "gold",
+        "adult": "red"
+      },
+      "panel_bg": "#f0f0f0",
+      "heatmap_bg": "#f2f2f2"
+    }
+  },
+  "protocol": {
+    "ft_len": 32,
+    "start_sign": "ff00ff00",
+    "stop_sign": "f000f000"
+  },
+  "recording": {
+    "in_template": "in_{person}_{area}{position}_{pose}_{seq}.bin",
+    "out_template": "out_{person}_{seq}.bin",
+    "default_person_id": "a1",
+    "default_action_time": 10,
+    "rename_suffix": "_{n}"
+  },
   "radar_config": {
     "ft_len": 32,
     "max_snapshots": 144,

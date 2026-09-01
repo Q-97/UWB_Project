@@ -1,7 +1,8 @@
-﻿"""配置层：NpEncoder / 项目根定位 / 配置持久化 / RadarConfig / 天线布局 / 算法默认参数。
+"""配置层：NpEncoder / 项目根定位 / 配置持久化 / RadarConfig / 天线布局 / 算法默认参数。
 
 原 gui_main.py 拆分产物（阶段 1：纯搬迁，行为不变）。
 """
+import copy
 import json
 import os
 from dataclasses import asdict, dataclass, field
@@ -38,11 +39,66 @@ _SAVE_FIELDS = [
     'can_cir_data_size', 'can_uci_signature', 'can_packet_cnt',
 ]
 
+# ---------------------------------------------------------------------------
+# 配置分区（阶段 2：硬编码 → 可配置）
+# 原则：默认值 = 现状，未配置时行为不变
+# ---------------------------------------------------------------------------
+DEFAULT_SECTIONS = {
+    "paths": {
+        "model_dir": "./model",            # 模型根目录（OA/BD .tflite 相对此解析）
+        "oa_model": "",                     # 默认 OA 模型路径（空 = 沿用 algo_params 里的 oa_model_path）
+        "data_dir": "./data",
+        "playback_export_dir": "",          # 回放样本导出目录（空 = 项目根 / <回放文件名>）
+    },
+    "gui": {
+        "title": "Radar V22 (Fixed)",
+        "window_size": "1300x850",
+        "speech_enabled": True,
+        "speech_texts": {"start": "开始采样", "stop": "结束采样"},
+        "colors": {
+            "state": {"empty": "green", "child": "gold", "adult": "red"},
+            "seat": {"empty": "green", "child": "gold", "adult": "red"},
+            "panel_bg": "#f0f0f0",
+            "heatmap_bg": "#f2f2f2",
+        },
+    },
+    "protocol": {
+        "ft_len": 32,
+        "start_sign": "ff00ff00",           # 标准帧起始魔数（hex 字符串）
+        "stop_sign": "f000f000",            # 标准帧结束魔数
+    },
+    "recording": {
+        # 录制文件名模板（{...} 占位符，默认值 = 原硬编码拼接逻辑）
+        "in_template": "in_{person}_{area}{position}_{pose}_{seq}.bin",
+        "out_template": "out_{person}_{seq}.bin",
+        "default_person_id": "a1",
+        "default_action_time": 10,
+        "rename_suffix": "_{n}",
+    },
+}
+
+
+def _merge_section(saved, defaults):
+    """一级浅合并：saved 覆盖 defaults，dict 值做二级合并（保留 defaults 新增 key）。"""
+    out = dict(defaults)
+    if isinstance(saved, dict):
+        for k, v in saved.items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = {**out[k], **v}
+            else:
+                out[k] = v
+    return out
+
+
 def save_config(config):
-    """将当前配置持久化到 JSON 文件"""
+    """将当前配置持久化到 JSON 文件（v2 分区格式）。"""
     try:
         data = {
-            "version": 1,
+            "version": 2,
+            "paths": config.paths,
+            "gui": config.gui,
+            "protocol": config.protocol,
+            "recording": config.recording,
             "radar_config": {k: getattr(config, k) for k in _SAVE_FIELDS if hasattr(config, k)},
             "algo_params": config.algo_params,
         }
@@ -51,13 +107,17 @@ def save_config(config):
     except Exception as e:
         print(f"[Config] 保存配置失败: {e}")
 
+
 def load_config(config):
-    """从 JSON 文件加载配置, 覆盖默认值. 返回 True 表示加载成功."""
+    """从 JSON 文件加载配置（兼容 v1/v2 格式）, 覆盖默认值. 返回 True 表示加载成功."""
     if not os.path.exists(CONFIG_FILE):
         return False
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        # 分区配置: 合并（v1 文件无分区 → 使用默认值）
+        for section in DEFAULT_SECTIONS:
+            setattr(config, section, _merge_section(data.get(section), DEFAULT_SECTIONS[section]))
         # 顶层配置: 只覆盖 JSON 中存在的 key
         rc = data.get("radar_config", {})
         for key, val in rc.items():
@@ -72,15 +132,64 @@ def load_config(config):
                 config.algo_params[algo_name].update(params)
             else:
                 config.algo_params[algo_name] = params
+        validate_algo_params(config.algo_params)
+        # 协议配置（帧魔数/帧长可配置）
+        configure_protocol(config.protocol, ft_len=getattr(config, 'ft_len', 32))
         # 确保天线布局与 current_layout_name 一致
         if 'RA-OCCUPANCY' in config.algo_params and 'range_bin_keep_range' in config.algo_params['RA-OCCUPANCY']:
             config.algo_params['RA-OCCUPANCY'].pop('range_bin_drop_front', None)
         config.load_layout(config.current_layout_name)
-        print(f"[Config] 配置已从 {CONFIG_FILE} 加载")
+        print(f"[Config] 配置已从 {CONFIG_FILE} 加载 (v{data.get('version', 1)})")
         return True
     except Exception as e:
         print(f"[Config] 加载配置失败: {e}")
         return False
+
+
+def configure_protocol(protocol_cfg, ft_len=None):
+    """把 protocol 分区应用到 RadarProtocol（帧魔数/帧长可配置）。
+
+    默认值 = 现状：start=ff00ff00 stop=f000f000 ft_len=32。
+    """
+    from app.protocol import RadarProtocol  # 局部导入，避免循环依赖
+    start = bytes.fromhex(str(protocol_cfg.get('start_sign', 'ff00ff00')))
+    stop = bytes.fromhex(str(protocol_cfg.get('stop_sign', 'f000f000')))
+    f = ft_len if ft_len is not None else int(protocol_cfg.get('ft_len', 32))
+    RadarProtocol.update_protocol(f, start_sign=start, stop_sign=stop)
+
+
+def get_algo(config, name):
+    """算法参数的深拷贝视图（防止外部修改污染默认值）。"""
+    return copy.deepcopy(config.algo_params.get(name, {}))
+
+
+def validate_algo_params(algo_params):
+    """轻量校验已知算法参数的类型/数值范围，非法值回落默认并告警。"""
+    rules = {
+        "RA-OCCUPANCY": {
+            "heatmap_update_stride_combined": (int, 1, None),
+            "azimuth_num": (int, 1, None),
+            "snapshots": (int, 1, None),
+        },
+        "POINT-CLOUD-OPTIMIZED": {"snapshots": (int, 1, None)},
+        "POINT-CLOUD-DUBHE": {"ring_buffer_len": (int, 1, None), "slide_step": (int, 1, None)},
+    }
+    for algo, checks in rules.items():
+        p = algo_params.get(algo)
+        if not isinstance(p, dict):
+            continue
+        for key, (typ, lo, hi) in checks.items():
+            if key not in p:
+                continue
+            v = p[key]
+            try:
+                ok = isinstance(v, typ) and (lo is None or v >= lo) and (hi is None or v <= hi)
+            except TypeError:
+                ok = False
+            if not ok:
+                default = DEFAULT_ALGO_PARAMS.get(algo, {}).get(key)
+                print(f"[Config] 警告: {algo}.{key}={v!r} 非法，回落默认 {default!r}")
+                p[key] = default
 
 # ==============================================================================
 # 1. Presets & Defaults
@@ -510,7 +619,13 @@ class RadarConfig:
     current_layout_name: str = "2x4_Default"
 
     # --- 算法参数容器 ---
-    algo_params: Dict[str, Any] = field(default_factory=lambda: DEFAULT_ALGO_PARAMS.copy())
+    algo_params: Dict[str, Any] = field(default_factory=lambda: copy.deepcopy(DEFAULT_ALGO_PARAMS))
+
+    # --- 配置分区（阶段 2：硬编码 → 可配置；默认值 = 现状）---
+    paths: Dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_SECTIONS["paths"]))
+    gui: Dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_SECTIONS["gui"]))
+    protocol: Dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_SECTIONS["protocol"]))
+    recording: Dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_SECTIONS["recording"]))
     current_algo: str = "PLOT"
     
     # --- 杂项 ---
