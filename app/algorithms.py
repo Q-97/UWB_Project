@@ -68,6 +68,7 @@ class AlgorithmProcessor:
     def _reset_algo_state(self):
         self.breathing_window = deque(maxlen=20)
         self.peak_window = deque(maxlen=10)
+        self._dbf_cache_fp = None
         self._reset_dubhe_state()
 
     def _reset_dubhe_state(self):
@@ -1680,24 +1681,24 @@ class AlgorithmProcessor:
 
         aoa_method = params.get('aoa_method', 'MUSIC')
         if aoa_method == 'DBF':
-            if getattr(self, '_dbf_sv_cache', None) is None:
-                wavelength = 2.99792458e8 / params['center_freq']
-                channels = params.get('ant_dbf_select', valid_indices)
+            channels = params.get('ant_dbf_select', valid_indices)
+            # 指纹缓存：参数变化时自动重建（修复原实现改参数后不重建的隐患）
+            fp = (tuple(channels), tuple(angle_deg_range), params.get('azimuth_num', 64),
+                  params.get('ant_calib_en', False),
+                  tuple(params.get('ant_calib_phase', [0.0] * 8)), params['center_freq'])
+            if getattr(self, '_dbf_sv_cache', None) is None or getattr(self, '_dbf_cache_fp', None) != fp:
+                # paper 路径天线模型（米制坐标）：与 optimized/dubhe 不同，勿合并
                 all_virt_x = np.array([-0.038, 0.0, -0.038, -0.019,
                                        0.0, 0.038, 0.0, 0.019])
-                ant_x = all_virt_x[channels] / wavelength
                 self._dbf_angles_cache = np.linspace(
                     np.deg2rad(angle_deg_range[0]),
                     np.deg2rad(angle_deg_range[1]),
                     params.get('azimuth_num', 64))
-                self._dbf_sv_cache = np.exp(
-                    -1j * 2 * np.pi *
-                    ant_x[:, np.newaxis] * np.sin(self._dbf_angles_cache[np.newaxis, :]))
-                if params.get('ant_calib_en', False):
-                    calib_phase = np.array(params.get('ant_calib_phase',
-                                          [0.0] * 8), dtype=np.float64)
-                    calib = np.exp(1j * calib_phase[channels])
-                    self._dbf_sv_cache = self._dbf_sv_cache * calib[:, np.newaxis]
+                self._dbf_sv_cache = self._build_dbf_steering(
+                    all_virt_x, channels, self._dbf_angles_cache,
+                    params.get('ant_calib_en', False), params.get('ant_calib_phase', [0.0] * 8),
+                    params['center_freq'])
+                self._dbf_cache_fp = fp
 
         # ==================== Pass 2 & 3: Per detected Range ====================
         detected_points = []
@@ -1857,22 +1858,31 @@ class AlgorithmProcessor:
         channels = params.get('ant_dbf_select', params.get('siso_ch', [2, 3, 6, 7]))
         # 8通道虚拟天线 x 坐标 (m): [TX1-RX4, TX1-RX5, TX1-RX6, TX1-RX7,
         #                            TX2-RX4, TX2-RX5, TX2-RX6, TX2-RX7]
-        all_virt_x = np.array([0.0 * wavelength , 0.5*wavelength , 1*wavelength, 0.5*wavelength, 0.5*wavelength, wavelength, 0*wavelength, -0.5*wavelength])
-        ant_x = all_virt_x[channels] / wavelength
-
+        all_virt_x = np.array([0.0 * wavelength, 0.5 * wavelength, 1 * wavelength, 0.5 * wavelength,
+                               0.5 * wavelength, wavelength, 0 * wavelength, -0.5 * wavelength])
         azi_deg = np.linspace(params['azi_angle_range'][0],
                               params['azi_angle_range'][1],
                               params['azimuth_num'])
         self._dbf_angles = np.deg2rad(azi_deg)
-        self._dbf_sv = np.exp(-1j * 2 * np.pi *
-                              ant_x[:, np.newaxis] * np.sin(self._dbf_angles[np.newaxis, :]))
+        self._dbf_sv = self._build_dbf_steering(
+            all_virt_x, channels, self._dbf_angles,
+            params.get('ant_calib_en', False), params.get('ant_calib_phase', [0] * 8),
+            params['center_freq'])
 
-        # 相位标定: 对齐 Dubhe 文档 Section 3.8.3 / Table 9
-        if params.get('ant_calib_en', False):
-            calib_phase = np.array(params.get('ant_calib_phase',
-                                  [0] * 8), dtype=np.float64)
-            calib = np.exp(1j * calib_phase[channels])
-            self._dbf_sv = self._dbf_sv * calib[:, np.newaxis]
+    @staticmethod
+    def _build_dbf_steering(all_virt_x, channels, angles_rad, calib_en, calib_phase, center_freq):
+        """构造 DBF 引导矢量矩阵（两种天线模型共用公式，阶段 3 统一）。
+
+        all_virt_x: 8 通道虚拟天线 x 坐标（米或波长倍数，统一除以波长归一）；
+        angles_rad: 调用方构造好的角度网格（保证浮点行为与原来完全一致）。
+        """
+        wavelength = 2.99792458e8 / center_freq
+        ant_x = np.asarray(all_virt_x, dtype=np.float64)[channels] / wavelength
+        sv = np.exp(-1j * 2 * np.pi * ant_x[:, np.newaxis] * np.sin(angles_rad[np.newaxis, :]))
+        if calib_en:
+            calib = np.exp(1j * np.asarray(calib_phase, dtype=np.float64)[channels])
+            sv = sv * calib[:, np.newaxis]
+        return sv
 
     def _init_capon_steering(self, params):
         """预计算 Capon 导向矢量矩阵, 与 calculate_capon_aoa 完全对齐"""
