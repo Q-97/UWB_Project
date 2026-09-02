@@ -740,10 +740,12 @@ class RadarDataManager:
         actual_lens = [len(b) for b in all_buffs]
         min_len = min(actual_lens) if actual_lens else 0
         
-        # 2. 如果是回放模式且数据量不足，我们强制对齐到最小长度
-        # 这样 arr 的最后一个维度将动态匹配实际抓取到的快照数
+        # 2. 统一对齐到最小有效长度，防止广播错误
+        # 实时模式下各通道到达时序不同（串口逐通道到达）或偶发丢帧时，
+        # 通道间帧数会不一致；回放模式下文件尾部也可能不足量。
+        # 取 min_len 保证 arr 最后一维与实际可用帧数匹配。
         target_len = self.config.max_snapshots
-        if self.config.connection_mode == 'PLAYBACK' and min_len < target_len:
+        if min_len < target_len:
             target_len = min_len
 
         if target_len <= 0: return None
