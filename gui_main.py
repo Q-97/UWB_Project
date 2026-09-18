@@ -139,11 +139,11 @@ def apply_range_bin_selection(current_cube, params, return_start_bin=False):
 # ==============================================================================
 ANTENNA_LAYOUTS = {
     "2x4_Default": {
-        "tx": [[-0.019, 0, 0.0], [0.019, 0, 0.0]],
-        "rx": [[-0.019, 0, 0.0], [0.019, 0, 0.0], [-0.019, 0.0, -0.02], [0.0, 0.0, -0.02]],
+        "tx": [[0.0188, 0, 0.0], [0.0188, 0, 0.0]],
+        "rx": [[0.0188*3, 0, 0.0188*2], [0.0188*2, 0, 0.0188*2], [0.0188, 0.0, 0.0188*2], [0.0, 0.0, 0.0188*2]],
         "tx_list": [2], "rx_list": [4, 5, 6, 7],
         "tx_num": 1, "rx_num": 4, "rx_start": 4,
-        "virt_ant_x": [0.0, 0.038, 0.0, 0.019],
+        "virt_ant_x": [0.0, 0.0188, 0.0376, 0.0564],
         "indices_azimuth": [0, 1, 2, 3]
     },
     "4x4_Demo": {
@@ -151,6 +151,14 @@ ANTENNA_LAYOUTS = {
         "rx": [[-0.03,0,0], [-0.01,0,0], [0.01,0,0], [0.03,0,0]],
         "tx_list": [1, 2, 3, 4], "rx_list": [5, 6, 7, 8],
         "tx_num": 4, "rx_num": 4, "rx_start": 5
+    },
+    "2x2_yzl": {
+        "tx": [[0.0188*2, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        "rx": [[0.0188*2, 0.0, 0.0188], [0.0188, 0.0, 0.0188]],
+        "tx_list": [1, 2], "rx_list": [1, 2],
+        "tx_num": 2, "rx_num": 2, "rx_start": 1,
+        "virt_ant_x": [0.0752, 0.0564, 0.0376, 0.0188],
+        "indices_azimuth": [0, 1, 2, 3]
     }
 }
 
@@ -387,6 +395,7 @@ DEFAULT_ALGO_PARAMS = {
         "center_freq": 7.9872e9,
         "snapshots": 64,
         "cir_combine_num": 1,
+        "heatmap_start_snapshots": 16,   # [加速] 热力图早启动阈值(帧数); 设0=回到等整缓冲
         "leakage_offset": 5,
         "doppler_window": "chebyshev",
         "doppler_win_atten": 60,
@@ -429,6 +438,7 @@ DEFAULT_ALGO_PARAMS = {
         "center_freq": 7.9872e9,
         "snapshots": 64,
         "cir_combine_num": 1,
+        "heatmap_start_snapshots": 64,   # [加速] 占用流水线攒够一个窗口(64)即开跑, 不必等540
         "leakage_offset": 5,
         "range_bin_keep_range": [5, 13],
         "range_zero_bin": 5.0,          # 原始 CIR 中对应物理 0 m 的 range bin
@@ -708,6 +718,15 @@ class RadarDataManager:
         self.bgs = {p: BackgroundRemoval(M=config.bg_m_factor) for p in self.pairs}
         self.buffer_full = False
 
+    def snapshot_count(self):
+        """当前各通道已缓存快照数的最小值（按最短通道，防对齐错位）。"""
+        lens = [len(b['complex']) for b in self.snapshots_data.values()]
+        return min(lens) if lens else 0
+
+    def ready_for(self, n_snapshots):
+        """是否已有至少 n_snapshots 个可用快照（不必等整缓冲填满）。"""
+        return self.buffer_full or self.snapshot_count() >= n_snapshots
+
     def process_frame(self, tx, rx, raw):
         if (tx, rx) not in self.snapshots_data: return None
         self.snapshots_data[(tx, rx)]['raw'].append(raw)
@@ -731,8 +750,18 @@ class RadarDataManager:
 
         return r_no_bg, r_abs_no_bg
 
-    def get_all_snapshot_as_array(self, type='complex'):
-        if not self.buffer_full: return None
+    def get_all_snapshot_as_array(self, type='complex', min_snapshots=None):
+        """取整窗数据 (num_rx, num_tx, ft_len, L)。
+
+        min_snapshots=None : 旧行为——必须整缓冲满(buffer_full)才可取；
+        min_snapshots=N    : 缓冲未满但已有 >=N 帧时也返回（供 RA 热力图早启动），
+                             取实际可用长度对齐。
+        """
+        if min_snapshots is not None:
+            if self.snapshot_count() < min_snapshots:
+                return None
+        elif not self.buffer_full:
+            return None
         
         # 1. 确定当前所有缓存中的最小有效长度
         # 这是为了防止某些通道只有 126 帧，而另一些有 127 帧导致的广播错误
@@ -2646,6 +2675,8 @@ class AlgorithmProcessor:
                                 ant_x[:, np.newaxis] * np.sin(self._capon_angles[np.newaxis, :]))
         # sv = sv * calib_sv  ← 与 calculate_capon_aoa 一致
         self._capon_sv = self._capon_sv * calib_sv
+        print("[CAPON] channels=", channels, "ant_x(λ)=", np.round(ant_x, 3),
+              "calib_en=", params.get('ant_calib_en'))
 
     def _compute_ra_heatmap(self, params):
         """
@@ -2663,11 +2694,13 @@ class AlgorithmProcessor:
           ranges_m:  (K,) 距离数组 (米)
           angles_deg:(I,) 角度数组 (度)
         """
-        all_c = self.dm.get_all_snapshot_as_array('complex')
+        N_snaps = params['snapshots']
+        # [加速] 不必等整缓冲(默认540)填满: 攒够 heatmap_start_snapshots(默认≤窗口)即出图
+        start_min = max(4, int(params.get('heatmap_start_snapshots', min(N_snaps, 16))))
+        all_c = self.dm.get_all_snapshot_as_array('complex', min_snapshots=start_min)
         if all_c is None:
             return None, None, None
 
-        N_snaps = params['snapshots']
         cir_comb = params.get('cir_combine_num', 1)
         leakage_offset = params['leakage_offset']
         current_cube = all_c[:, :, :, -N_snaps:]
@@ -2680,8 +2713,8 @@ class AlgorithmProcessor:
         if cir_comb > 1:
             n_comb = current_cube.shape[3] // cir_comb
             trim = n_comb * cir_comb
-            current_cube = current_cube[:, :, :32, :trim] \
-                .reshape(num_rx, num_tx, 32, n_comb, cir_comb).mean(axis=4)
+            current_cube = current_cube[:, :, :16, :trim] \
+                .reshape(num_rx, num_tx, 16, n_comb, cir_comb).mean(axis=4)
         current_cube, range_bin_start = apply_range_bin_selection(
             current_cube, params, return_start_bin=True)
 
@@ -2710,7 +2743,7 @@ class AlgorithmProcessor:
         for k_idx in range(K):
             A_k = A_all[:, k_idx, :]
             R_k = (A_k @ A_k.conj().T) / L
-            R_k += np.eye(4) * diag_load * np.abs(np.trace(R_k))
+            R_k += np.eye(R_k.shape[0]) * diag_load * np.abs(np.trace(R_k))
             try:
                 R_inv = np.linalg.inv(R_k)
             except np.linalg.LinAlgError:
@@ -5237,6 +5270,7 @@ class App:
         self.plot_panel.init_layout("PLOT", self.config.algo_params['PLOT'])
         self._ra_occ_snapshot_counter = 0
         self._last_ra_occ_heatmap_snapshot = None
+        self._last_hm_run_snapshot = -1      # [加速] RA-HEATMAP 上次产图对应的快照号
         self._ra_occ_h_bg_buffer = deque(maxlen=8)
         self._ra_occ_h_buffer = deque(maxlen=8)
         self._ra_occ_raw_window_buffer = deque(maxlen=8)
@@ -5662,8 +5696,20 @@ class App:
         cir_comb = max(1, int(p.get('cir_combine_num', 1)))
         return stride_combined * cir_comb
 
+    def _ra_heatmap_ready(self):
+        """RA-HEATMAP 是否可出图：整缓冲已满，或已攒够 heatmap_start_snapshots。"""
+        if self.data_manager.buffer_full:
+            return True
+        p = self.config.algo_params.get('RA-CFAR', {})
+        n_win = int(p.get('snapshots', 64))
+        start = max(4, int(p.get('heatmap_start_snapshots', min(n_win, 16))))
+        return self.data_manager.snapshot_count() >= start
+
     def _try_step_ra_occupancy(self):
-        if not self.data_manager.buffer_full:
+        # [加速] 不必等整缓冲(540)填满: 攒够一个快照窗口(heatmap_start_snapshots)即开跑
+        p0 = self.config.algo_params.get('RA-OCCUPANCY', {})
+        start_min = max(4, int(p0.get('heatmap_start_snapshots', p0.get('snapshots', 64))))
+        if not self.data_manager.ready_for(start_min):
             return None
 
         current_snapshot = self._ra_occ_snapshot_counter
@@ -5725,8 +5771,10 @@ class App:
                         if d_ra_occ:
                             ra_occ_data = d_ra_occ
             
-            # 只有在新帧触发了缓冲区更新后，才执行算法
-            if self.data_manager.buffer_full:
+            # 只有在新帧触发了缓冲区更新后，才执行算法。
+            # [加速] RA-HEATMAP 不必等整缓冲(540)填满: 攒够 heatmap_start_snapshots 即可开跑
+            hm_early = (m == 'RA-HEATMAP' and self._ra_heatmap_ready())
+            if self.data_manager.buffer_full or hm_early:
                 d = None
                 
                 if m == 'PLOT':
@@ -5764,7 +5812,11 @@ class App:
                         d['f_values'] = f_vals
 
                 elif m == 'RA-HEATMAP':
-                    d = self.algo_processor.step_ra_heatmap_view()
+                    # [加速] 只有出现新快照才重算热力图, 避免 50Hz tick 空转重算(A3)
+                    if self._ra_occ_snapshot_counter != self._last_hm_run_snapshot:
+                        d = self.algo_processor.step_ra_heatmap_view()
+                        if d is not None:
+                            self._last_hm_run_snapshot = self._ra_occ_snapshot_counter
                 elif m == 'RA-OCCUPANCY':
                     d = ra_occ_data
                 elif m == 'ANGLE-SPECTRUM':
