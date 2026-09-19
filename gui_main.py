@@ -470,6 +470,11 @@ DEFAULT_ALGO_PARAMS = {
         "heatmap_clim_vmin": -80,
         "heatmap_clim_vmax": 0,
         "heatmap_background_color": "#f2f2f2",
+        # ---- 显示模式: 热力图 / 定位图(仅峰值红点) ----
+        "ra_occ_show_localization": False,      # False=热力图(默认) / True=定位图
+        "ra_occ_marker_size": 8.0,              # 定位图红点大小 (pt)
+        "ra_occ_localization_smooth": "mode",   # off/mode/mean: 红点位置取最近N帧众数/均值
+        "ra_occ_localization_hold_sec": 1.0,    # >0: 峰值失效后红点保持该秒数再消失
     },
 
     "SEAT-OCCUPANCY": {
@@ -3729,6 +3734,20 @@ class PlotPanel(tk.Frame):
             self.plots['ra_occ_cbar'] = self.figure.colorbar(
                 self.plots['ra_occ_hm'], ax=ax_hm, fraction=0.046, pad=0.04)
             self.plots['ra_occ_cbar'].set_label('Power')
+
+            # ---- 定位图峰值标记: 常驻 artist, 只切可见性, 不重建 figure ----
+            # scalex/scaley=False: 新增 artist 不参与 autoscale, 否则会把坐标范围撑坏
+            self._ra_occ_last_extent = None
+            self._ra_occ_marker_last = None
+            self._ra_occ_marker_ts = 0.0
+            self.plots['ra_occ_view'] = bool(params.get('ra_occ_show_localization', False))
+            self.plots['ra_occ_marker'], = ax_hm.plot(
+                [], [], marker='o', linestyle='none',
+                markersize=float(params.get('ra_occ_marker_size', 8.0)),
+                markerfacecolor='red', markeredgecolor='red',
+                zorder=5,                      # 压在座位椭圆/标号之上
+                scalex=False, scaley=False)
+            self.plots['ra_occ_marker'].set_visible(self.plots['ra_occ_view'])
             self.plots['ra_occ_oa_button'] = patches.Rectangle(
                 (0.72, 1.21), 0.24, 0.065, transform=ax_hm.transAxes,
                 facecolor='green', edgecolor='#222222', linewidth=1.2,
@@ -3762,6 +3781,9 @@ class PlotPanel(tk.Frame):
             occ_params = params.copy()
             occ_params['occupancy_config'] = params.get('occupancy_config', None)
             self._draw_seating_ellipses(ax_hm, occ_params)
+
+            # 按开关初始化显示模式 (定位图下椭圆/标号会被隐藏)
+            self.set_ra_occ_view(self.plots['ra_occ_view'])
 
             # 右: 田字格状态面板 (2x2 grid)
             ax_occ.set_title("Seat Status")
@@ -3871,6 +3893,115 @@ class PlotPanel(tk.Frame):
 
             self.axes = {'as': ax_as, 'rd': ax_rd}
         self.canvas.draw()
+
+    def set_ra_occ_view(self, localization):
+        """切换 RA-OCCUPANCY 显示模式.
+
+        localization=False → 热力图 (imshow + colorbar + 座位椭圆/标号)
+        localization=True  → 定位图 (仅峰值处一个红色实心圆, 无椭圆无标号)
+
+        只切 artist 可见性, 不重建 figure, 因此不会清空 ra_occ_peak_history
+        与 App 侧 OA 模型窗口缓冲; 热力图下方 ax_info 的坐标文字始终保留.
+        """
+        localization = bool(localization)
+        self.plots['ra_occ_view'] = localization
+
+        hm = self.plots.get('ra_occ_hm')
+        if hm is not None:
+            hm.set_visible(not localization)
+
+        cbar = self.plots.get('ra_occ_cbar')
+        if cbar is not None:
+            cbar.ax.set_visible(not localization)
+
+        marker = self.plots.get('ra_occ_marker')
+        if marker is not None:
+            marker.set_visible(localization)
+            if not localization:
+                marker.set_data([], [])
+
+        # 定位图下不保留座位椭圆与标号; 切回热力图时恢复
+        for group in (getattr(self, '_seat_adult_patches', None),
+                      getattr(self, '_seat_child_patches', None),
+                      getattr(self, '_seat_texts', None)):
+            for artist in (group or {}).values():
+                artist.set_visible(not localization)
+
+        # 锁定坐标范围, 保证隐藏 imshow 后视野与热力图一致
+        ax = self.axes.get('main')
+        ext = getattr(self, '_ra_occ_last_extent', None)
+        if ax is not None and ext is not None:
+            ax.set_xlim(ext[0], ext[1])
+            ax.set_ylim(ext[2], ext[3])
+
+        self.canvas.draw_idle()
+
+    def _update_ra_occ_marker(self, params, h_max, mean_th, peak_x_m, peak_y_m,
+                              mode_range_m, mode_angle_deg,
+                              mean_range_m, mean_angle_deg):
+        """定位图红点位置更新 (含防抖: 时域平滑 + 保持).
+
+        有效峰: 本轮 argmax 峰存在, 且原始 H 的最大值 h_max 不低于 oa_mean_threshold.
+          有效时按 ra_occ_localization_smooth 取点, 与下方 ax_info 文字保持一致:
+            'off'  → Cartesian 峰值      (对应文字 "XY peak" 行)
+            'mode' → 最近 N 帧 polar 众数 (对应文字 "Mode[n]" 行)
+            'mean' → 最近 N 帧 polar 均值 (对应文字 "Mean[n]" 行)
+        无效峰: 若 hold_sec > 0, 红点在上一次有效位置保持 hold_sec 秒; 超时后清除.
+        """
+        marker = self.plots.get('ra_occ_marker')
+        if marker is None:
+            return
+
+        show_loc = bool(params.get('ra_occ_show_localization', False))
+        if show_loc != self.plots.get('ra_occ_view', False):
+            self.set_ra_occ_view(show_loc)      # 参数被其它入口改动时也能跟上
+        if not show_loc:
+            return
+
+        smooth = str(params.get('ra_occ_localization_smooth', 'mode')).lower()
+        try:
+            hold_sec = float(params.get('ra_occ_localization_hold_sec', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            hold_sec = 0.0
+
+        peak_valid = (peak_x_m is not None and peak_y_m is not None
+                      and float(h_max) >= float(mean_th))
+
+        xy = None
+        if peak_valid:
+            xy = self._ra_occ_smoothed_xy(smooth, peak_x_m, peak_y_m,
+                                          mode_range_m, mode_angle_deg,
+                                          mean_range_m, mean_angle_deg)
+            self._ra_occ_marker_last = xy
+            self._ra_occ_marker_ts = time.time()
+        elif (hold_sec > 0 and self._ra_occ_marker_last is not None
+              and (time.time() - self._ra_occ_marker_ts) <= hold_sec):
+            xy = self._ra_occ_marker_last      # 保持上一次有效位置
+        else:
+            self._ra_occ_marker_last = None
+
+        if xy is None:
+            marker.set_data([], [])
+        else:
+            marker.set_data([xy[0]], [xy[1]])
+
+    @staticmethod
+    def _ra_occ_smoothed_xy(smooth, peak_x_m, peak_y_m,
+                            mode_range_m, mode_angle_deg,
+                            mean_range_m, mean_angle_deg):
+        """按平滑策略给出红点坐标; polar 输入按 x=r*sin(θ), y=-r*cos(θ) 换算.
+
+        换算式与 _ra_to_cartesian / _seat_ra_energy 中的映射完全一致.
+        """
+        def polar_to_xy(r_m, a_deg):
+            a = np.deg2rad(a_deg)
+            return (float(r_m * np.sin(a)), float(-r_m * np.cos(a)))
+
+        if smooth == 'mode' and mode_range_m is not None and mode_angle_deg is not None:
+            return polar_to_xy(mode_range_m, mode_angle_deg)
+        if smooth == 'mean' and mean_range_m is not None and mean_angle_deg is not None:
+            return polar_to_xy(mean_range_m, mean_angle_deg)
+        return (float(peak_x_m), float(peak_y_m))
 
     def _update_ra_occ_oa_filter(self, oa_label, oa_status, params):
         """Apply the configurable majority filter to raw OA button values."""
@@ -4077,6 +4208,8 @@ class PlotPanel(tk.Frame):
             peak_angle_deg = data.get('peak_angle_deg')
             peak_x_m = data.get('peak_x_m')
             peak_y_m = data.get('peak_y_m')
+            mode_range_m = mode_angle_deg = None
+            mean_range_m = mean_angle_deg = None
             if all(value is not None for value in
                    (peak_range_m, peak_angle_deg, peak_x_m, peak_y_m)):
                 self.ra_occ_peak_history.append(
@@ -4124,6 +4257,11 @@ class PlotPanel(tk.Frame):
                 text = 'IN' if oa_label == 1 else ('EMPTY' if oa_status == 'empty' else 'OUT')
                 self.plots['ra_occ_oa_button'].set_facecolor(color)
                 self.plots['ra_occ_oa_text'].set_text(text)
+
+            # ---- 定位图: 仅在峰值处画一个红色实心圆 (防抖: 时域平滑 + 保持) ----
+            self._update_ra_occ_marker(p, h_max, mean_th, peak_x_m, peak_y_m,
+                                       mode_range_m, mode_angle_deg,
+                                       mean_range_m, mean_angle_deg)
 
             # 座位椭圆着色 (复用 _update_seat_colors)
             if occupancy:
@@ -4700,6 +4838,16 @@ class ControlPanel(tk.Frame):
         self.cb_layout.pack(side='right', fill='x', expand=True)
         self.cb_layout.bind("<<ComboboxSelected>>", self._on_layout_change)
 
+        # --- RA-OCCUPANCY 显示模式: 热力图 / 定位图(仅峰值红点) ---
+        self.frm_ra_occ_view = tk.Frame(frm_algo, bg='#f0f0f0')
+        self.var_ra_occ_loc = tk.BooleanVar(
+            value=bool(config.algo_params.get('RA-OCCUPANCY', {})
+                       .get('ra_occ_show_localization', False)))
+        tk.Checkbutton(self.frm_ra_occ_view, text="定位图 (仅峰值红点)",
+                       variable=self.var_ra_occ_loc, bg='#f0f0f0',
+                       command=self._on_ra_occ_view_toggle).pack(side='left')
+        self._refresh_ra_occ_view_row()
+
         # --- [重构] 录制设置面板: 座位勾选 + 目录下拉 + 文件名自动生成 ---
         frm_rec = tk.LabelFrame(self, text="Recording Settings", bg='#f0f0f0', fg='blue')
         frm_rec.pack(fill='x', padx=5, pady=5)
@@ -5091,14 +5239,30 @@ class ControlPanel(tk.Frame):
 
     def _on_algo_change(self, e): 
         self.config.current_algo = self.cb_algo.get()
+        self._refresh_ra_occ_view_row()
         self.cbs['update_layout'](self.config.current_algo)
+
+    def _on_ra_occ_view_toggle(self):
+        """勾选/取消定位图: 只写参数并实时切换显示, 不触发 update_layout."""
+        self.cbs['ra_occ_view'](self.var_ra_occ_loc.get())
+
+    def _refresh_ra_occ_view_row(self):
+        """仅当前算法为 RA-OCCUPANCY 时显示该开关, 并与参数保持同步."""
+        if self.config.current_algo == 'RA-OCCUPANCY':
+            self.var_ra_occ_loc.set(bool(
+                self.config.algo_params.get('RA-OCCUPANCY', {})
+                .get('ra_occ_show_localization', False)))
+            self.frm_ra_occ_view.pack(fill='x', padx=2, pady=(3, 0))
+        else:
+            self.frm_ra_occ_view.pack_forget()
 
     def _open_algo(self):
         AlgoSettingsDialog(self, self.config.current_algo,
                            self.config.algo_params.get(self.config.current_algo, {}),
                            lambda p: (self.config.algo_params.update({self.config.current_algo: p}),
                                       save_config(self.config),
-                                      self.cbs['update_layout'](self.config.current_algo)))
+                                      self.cbs['update_layout'](self.config.current_algo),
+                                      self._refresh_ra_occ_view_row()))
 
     def _refresh_occ_checkboxes(self):
         """录制命名已改为固定采样标签, 座椅配置变化时只刷新文件名."""
@@ -5264,7 +5428,7 @@ class App:
         self.data_manager = RadarDataManager(self.config); self.algo_processor = AlgorithmProcessor(self.config, self.data_manager)
         self.source = None; self.running = False
         self.root.columnconfigure(1, weight=1); self.root.rowconfigure(0, weight=1)
-        cbs = {'start': self.start, 'stop': self.stop, 'rec_start': self.rec_start, 'rec_stop': self.rec_stop, 'update_layout': self.update_layout}
+        cbs = {'start': self.start, 'stop': self.stop, 'rec_start': self.rec_start, 'rec_stop': self.rec_stop, 'update_layout': self.update_layout, 'ra_occ_view': self.set_ra_occ_view}
         self.ctrl = ControlPanel(root, self.config, cbs); self.ctrl.grid(row=0, column=0, sticky='ns')
         self.plot_panel = PlotPanel(root); self.plot_panel.grid(row=0, column=1, sticky='nsew')
         self.plot_panel.init_layout("PLOT", self.config.algo_params['PLOT'])
@@ -5287,6 +5451,13 @@ class App:
         occ_params = self.config.algo_params.get('SEAT-OCCUPANCY', {})
         self.seat_detector = SeatOccupancyDetector(occ_params)
         self.ra_occupancy_detector = RAOccupancyDetector(occ_params)
+    def set_ra_occ_view(self, localization):
+        """RA-OCCUPANCY 显示模式: False=热力图 / True=定位图(仅峰值红点)."""
+        params = self.config.algo_params.setdefault('RA-OCCUPANCY', {})
+        params['ra_occ_show_localization'] = bool(localization)
+        save_config(self.config)                       # 立即持久化
+        self.plot_panel.set_ra_occ_view(bool(localization))
+
     def update_layout(self, mode):
         # 1. 更新绘图面板的布局
         p = self.config.algo_params.get(mode, {})
