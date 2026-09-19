@@ -4778,12 +4778,73 @@ class SeatConfigDialog(tk.Toplevel):
         self.destroy()
 
 
+def fit_to_screen(root, pref_w=1300, pref_h=850,
+                  margin_w=60, margin_h=80, min_w=880, min_h=560):
+    """按屏幕可用尺寸自适应窗口大小并居中, 避免小屏/高 DPI 下显示不全.
+
+    窗口不会超过屏幕; 但若内容仍高于可用高度, 由左侧 ScrollFrame 滚动承载.
+    """
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    w = max(min_w, min(pref_w, sw - margin_w))
+    h = max(min_h, min(pref_h, sh - margin_h))
+    root.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
+    root.minsize(min_w, min_h)
+    return w, h
+
+
+class ScrollFrame(tk.Frame):
+    """通用可滚动容器: 内容控件的 parent 传 self.body 即可.
+
+    用途: 左侧控制面板内容纵向需求远超小屏可用高度, tkinter 本身不会滚动,
+    底部 START/STOP 等按钮会被裁掉; 套一层本容器后即可滚动查看全部内容.
+    注意: 内容控件需 pack_propagate(True), 否则高度被压成 1px 导致无法滚动.
+    """
+    def __init__(self, parent, width=380, bg='#f0f0f0', **kw):
+        super().__init__(parent, **kw)
+        self.canvas = tk.Canvas(self, width=width, highlightthickness=0, bg=bg)
+        self.vbar = ttk.Scrollbar(self, orient='vertical', command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vbar.set, yscrollincrement=20)
+        self.canvas.pack(side='left', fill='both', expand=True)
+        self.vbar.pack(side='right', fill='y')
+
+        self.body = tk.Frame(self.canvas, bg=bg)
+        self._body_id = self.canvas.create_window((0, 0), window=self.body, anchor='nw')
+        self.body.bind(
+            '<Configure>',
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+        self.canvas.bind(
+            '<Configure>',
+            lambda e: self.canvas.itemconfigure(self._body_id, width=e.width))
+
+        # 滚轮: 绑到 all, 但只在指针位于本容器内时才滚动 (不影响绘图区/对话框)
+        self.canvas.bind_all('<MouseWheel>', self._on_mousewheel)
+
+    def _on_mousewheel(self, event):
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        while widget is not None and widget is not self:
+            if widget is self.canvas:
+                box = self.canvas.bbox('all')
+                if box and box[3] > self.canvas.winfo_height():   # 内容超高才滚
+                    steps = int(-event.delta / 120) or (-1 if event.delta > 0 else 1)
+                    self.canvas.yview_scroll(steps, 'units')
+                return
+            widget = widget.master
+
+    def scroll_to_widget(self, widget):
+        """把指定控件滚动到可见区域 (调试/跳转用)."""
+        self.canvas.update_idletasks()
+        box = self.canvas.bbox('all')
+        if not box or box[3] <= self.canvas.winfo_height():
+            return
+        self.canvas.yview_moveto(max(0.0, min(1.0, widget.winfo_y() / box[3])))
+
+
 class ControlPanel(tk.Frame):
     def __init__(self, parent, config, cbs):
-        super().__init__(parent, width=320, bg='#f0f0f0')
+        super().__init__(parent, bg='#f0f0f0')
         self.config = config
         self.cbs = cbs
-        self.pack_propagate(False)
+        # 宽度/高度由内容决定: 由 App 侧的 ScrollFrame 承载滚动, 不再锁死 320px
 
         # --- 标题 ---
         tk.Label(self, text="Radar V22 (Fixed)", bg='#f0f0f0', font=('Arial', 12, 'bold')).pack(pady=5)
@@ -5422,14 +5483,18 @@ class ControlPanel(tk.Frame):
 
 class App:
     def __init__(self, root):
-        self.root = root; self.root.geometry("1300x850"); self.config = RadarConfig(); self.config.load_layout("2x4_Default")
+        self.root = root; fit_to_screen(root); self.config = RadarConfig(); self.config.load_layout("2x4_Default")
         load_config(self.config)  # 持久化: 用已保存的配置覆盖默认值
         if not os.path.exists(self.config.data_save_dir): os.makedirs(self.config.data_save_dir)
         self.data_manager = RadarDataManager(self.config); self.algo_processor = AlgorithmProcessor(self.config, self.data_manager)
         self.source = None; self.running = False
         self.root.columnconfigure(1, weight=1); self.root.rowconfigure(0, weight=1)
         cbs = {'start': self.start, 'stop': self.stop, 'rec_start': self.rec_start, 'rec_stop': self.rec_stop, 'update_layout': self.update_layout, 'ra_occ_view': self.set_ra_occ_view}
-        self.ctrl = ControlPanel(root, self.config, cbs); self.ctrl.grid(row=0, column=0, sticky='ns')
+        # 左栏放进可滚动容器: 小屏/高 DPI 下也能访问全部控件(含底部 START/STOP)
+        self.ctrl_host = ScrollFrame(root); self.ctrl_host.grid(row=0, column=0, sticky='ns')
+        self.ctrl = ControlPanel(self.ctrl_host.body, self.config, cbs)
+        self.ctrl.pack_propagate(True)      # 让面板按内容撑开(否则高度被压成 1px, 滚不动)
+        self.ctrl.pack(fill='x')
         self.plot_panel = PlotPanel(root); self.plot_panel.grid(row=0, column=1, sticky='nsew')
         self.plot_panel.init_layout("PLOT", self.config.algo_params['PLOT'])
         self._ra_occ_snapshot_counter = 0
