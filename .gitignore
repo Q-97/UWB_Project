@@ -12,8 +12,6 @@ __pycache__/
 Thumbs.db
 
 # ===== 运行时生成 / 本地数据（不入库） =====
-# config_save.json 由程序运行时生成（gui_main.py 有默认值兜底）
-config_save.json
 # 采样原始数据与样本输出
 data/
 in_b2_d3_l1_1/
