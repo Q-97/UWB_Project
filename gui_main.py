@@ -63,6 +63,7 @@ _SAVE_FIELDS = [
     'playback_duration', 'export_pc_json', 'recent_save_dirs',
     'can_device_type', 'mcu_name', 'can_packet_size', 'can_header_size',
     'can_cir_data_size', 'can_uci_signature', 'can_packet_cnt',
+    'algo_chan_sel',
 ]
 
 def save_config(config):
@@ -623,6 +624,11 @@ class RadarConfig:
     # --- 算法参数容器 ---
     algo_params: Dict[str, Any] = field(default_factory=lambda: DEFAULT_ALGO_PARAMS.copy())
     current_algo: str = "PLOT"
+
+    # --- 全局: 进入算法的通道选择 ---
+    # 虚拟通道索引(tx 主序, 与布局 virt_ant_x 同序), 例如 [0,1,3] 表示 4 通道里只取 3 个;
+    # 空 [] = 不干预(各算法沿用自身原有通道键, 行为与从前完全一致).
+    algo_chan_sel: List[int] = field(default_factory=list)
     
     # --- 杂项 ---
     snapshot_rate: int = 20
@@ -821,6 +827,8 @@ class AlgorithmProcessor:
         self.dm = data_manager
         self.init_done = False
         self.virtual_pairs = None
+        self._last_input_log = {}      # [新增] 各算法上次打印的输入描述(用于节流)
+        self._last_input_log_ts = {}
         self._reset_algo_state()
 
     def _reset_algo_state(self):
@@ -829,7 +837,10 @@ class AlgorithmProcessor:
         self._reset_dubhe_state()
 
     def _reset_dubhe_state(self):
-        self.dubhe_accum = np.zeros((4, 2, 32), dtype=np.complex64)
+        # [修改] 通道维/抽头数随布局与协议决定, 不再写死 (4, 2, 32)
+        self.dubhe_accum = np.zeros(
+            (self.config.num_rx_antennas, self.config.num_tx_antennas,
+             self.config.ft_len), dtype=np.complex64)
         self.dubhe_accum_cnt = 0
         self.dubhe_ring = deque(maxlen=50)
         self.dubhe_new_comb_cnt = 0
@@ -1008,6 +1019,16 @@ class AlgorithmProcessor:
         all_c  =  all_c[:,:,offset:,:]
         # 提取快照
         cir_snaps = [all_c[..., i] for i in range(-n_snaps, 0)]
+
+        # [新增] 通道选择: 设置后按所选虚拟通道(tx主序)重建 (tx_idx, rx_idx) 对
+        num_rx, num_tx = self.config.num_rx_antennas, self.config.num_tx_antennas
+        chan_sel = self.channel_indices(params, num_rx * num_tx, tag='2D-MUSIC')
+        if chan_sel:
+            selected_pairs = [divmod(int(i), max(1, num_rx)) for i in chan_sel]
+        else:
+            selected_pairs = self.virtual_pairs
+        self.log_input('2D-MUSIC', chan_sel=chan_sel, cube=all_c,
+                       extra=f"snaps={len(cir_snaps)} pairs={len(selected_pairs) if selected_pairs else 0}")
         
         # --- [关键修改] 频率计算逻辑 ---
         cf = params['center_freq']
@@ -1025,7 +1046,7 @@ class AlgorithmProcessor:
         # 3. 运行核心算法
         trm_image, k_hat = self._run_2d_music_mdl_internal(
             cir_snapshots=cir_snaps,
-            selected_pairs=self.virtual_pairs,
+            selected_pairs=selected_pairs,
             freq_axis=selected_freq_axis, # 传入筛选后的物理频率
             imaging_grid=self.config.imaging_grid,
             max_targets=params['mdl_max_targets'],
@@ -1092,6 +1113,13 @@ class AlgorithmProcessor:
     def step_waveform(self):
         params = self.config.algo_params['PLOT']
         tx, rx = params['tx_pair'], params['rx_pair']
+        # [新增] 设置了通道选择时, 用第一个被选中的虚拟通道作为显示通道
+        chan_sel = self.channel_indices(params, len(self.dm.pairs), tag='PLOT')
+        if chan_sel:
+            tx_idx, rx_idx = divmod(int(chan_sel[0]), max(1, self.config.num_rx_antennas))
+            if tx_idx < len(self.config.udp_tx_list) and rx_idx < len(self.config.udp_rx_list):
+                tx = self.config.udp_tx_list[tx_idx]
+                rx = self.config.udp_rx_list[rx_idx]
         pair = (tx, rx)
         if pair not in self.dm.snapshots_data: 
             if self.dm.snapshots_data: pair = list(self.dm.snapshots_data.keys())[0]
@@ -1104,6 +1132,8 @@ class AlgorithmProcessor:
         d = buff[-1]
         d_real = np.real(d); d_imag = np.imag(d)
         is_sat = np.any(d_real >= 32767) or np.any(d_imag >= 32767)
+        self.log_input('PLOT', chan_sel=chan_sel, wave=d,
+                       extra=f"pair=TX{pair[0]}-RX{pair[1]} key={key}")
         return {"y": np.abs(d), "y_real": d_real, "y_imag": d_imag, "max_real": np.max(d_real), "is_sat": is_sat, "params": params, "pair": pair}
 
 
@@ -1327,6 +1357,108 @@ class AlgorithmProcessor:
         # print("angles ",angles[np.argmax(pseudo_spectrum)])
         return angles[np.argmax(pseudo_spectrum)]
 
+    # ================= [新增] 统一通道选择 与 输入形状日志 =================
+    def _warn_throttled(self, key, msg, interval=1.0):
+        """警告节流: 内容变化立即打印, 否则同一 key 最多每 interval 秒一次."""
+        logs = getattr(self, '_chan_warn_log', None)
+        if logs is None:
+            logs = self._chan_warn_log = {}
+            self._chan_warn_ts = {}
+        now = time.time()
+        if (msg != logs.get(key)
+                or (now - self._chan_warn_ts.get(key, 0.0)) >= interval):
+            print(msg)
+            logs[key] = msg
+            self._chan_warn_ts[key] = now
+
+    def _parse_chan_sel(self, sel, limit=None, tag=''):
+        """解析通道选择值: 支持 [0,1,3] / "0,1,3" / "0,1,3," / "(0,1,3)".
+
+        返回 list[int](去重且保序) 或 None(非法时打印原因).
+        """
+        if isinstance(sel, str):
+            sel = [t for t in sel.strip().strip('()[]')
+                   .replace('\uff0c', ',').replace(' ', '').split(',') if t]
+        try:
+            sel = [int(x) for x in sel]
+        except (TypeError, ValueError):
+            self._warn_throttled(f'parse:{tag}', f"[通道选择] 无法解析: {sel!r}, 已忽略并回退 ({tag})")
+            return None
+        sel = list(dict.fromkeys(sel))                      # 去重且保持顺序
+        if not sel:
+            return None
+        bad = [i for i in sel if i < 0 or (limit is not None and i >= limit)]
+        if bad:
+            self._warn_throttled(
+                f'range:{tag}:{sel}',
+                f"[通道选择] {sel} 越界 {bad} (可用范围 0..{(limit or 0) - 1}), 已忽略并回退 ({tag})")
+            return None
+        return sel
+
+    def _global_chan_sel(self, params):
+        """取生效的通道选择值: 算法级 algo_chan_sel 优先, 否则全局 config.algo_chan_sel.
+
+        返回 (sel, source) ; sel 为 None 表示不干预.
+        """
+        for key, src in (('algo_chan_sel', 'algo'),):
+            sel = params.get(key)
+            if sel is not None and sel != '' and not (isinstance(sel, (list, tuple)) and len(sel) == 0):
+                return sel, src
+        sel = getattr(self.config, 'algo_chan_sel', None)
+        if sel is not None and sel != '' and not (isinstance(sel, (list, tuple)) and len(sel) == 0):
+            return sel, 'global'
+        return None, None
+
+    def channel_indices(self, params, num_chan=None, default=None, tag=''):
+        """统一的"进入算法的通道"入口 (所有算法共用).
+
+        优先级: params['algo_chan_sel'] > config.algo_chan_sel > default(调用点原有逻辑).
+        sel 为空/非法时原样返回 default, 因此不设置该参数时行为与从前完全一致.
+        """
+        sel, _ = self._global_chan_sel(params)
+        if sel is None:
+            return default
+        parsed = self._parse_chan_sel(sel, num_chan, tag)
+        return default if parsed is None else parsed
+
+    def chan_sel_geometry(self, params, legacy_ant_x, legacy_channels, tag=''):
+        """统一几何解析: 设置了通道选择时, 用布局几何(config.virt_ant_x)按所选通道取坐标;
+
+        未设置时原样返回算法自带的几何/通道(完全保持原行为).
+        返回 (ant_x_归一化到波长, channels)
+        """
+        sel, src = self._global_chan_sel(params)
+        if sel is None:
+            return legacy_ant_x, legacy_channels
+        virt_x = getattr(self.config, 'virt_ant_x', None)
+        if virt_x is None:
+            print(f"[通道选择] 当前布局未定义 virt_ant_x, 几何沿用算法自带表 ({tag})")
+            return legacy_ant_x, legacy_channels
+        virt_x = np.asarray(virt_x, dtype=float)
+        channels = self._parse_chan_sel(sel, len(virt_x), tag)
+        if channels is None:
+            return legacy_ant_x, legacy_channels
+        wavelength = 2.99792458e8 / params.get('center_freq', 7.9872e9)
+        return virt_x[channels] / wavelength, channels
+
+    def log_input(self, algo, chan_sel=None, extra='', **shapes):
+        """[新增] 进入算法前打印输入数据形状.
+
+        节流: 内容变化时立即打印, 否则同一算法最多每秒一次(避免刷屏).
+        """
+        parts = [f"{k}={tuple(np.shape(v))}" for k, v in shapes.items() if v is not None]
+        msg = f"[输入] {algo} | " + " | ".join(parts)
+        if extra:
+            msg += f" | {extra}"
+        if chan_sel is not None:
+            msg += f" | 通道={[int(c) for c in chan_sel]} ({len(chan_sel)}个)"
+        now = time.time()
+        if (msg != self._last_input_log.get(algo)
+                or (now - self._last_input_log_ts.get(algo, 0.0)) >= 1.0):
+            print(msg)
+            self._last_input_log[algo] = msg
+            self._last_input_log_ts[algo] = now
+
     def _get_capon_antenna_x(self, params):
         """
         获取 Capon 导向矢量所需的实际天线 x 坐标 (归一化到波长).
@@ -1346,8 +1478,9 @@ class AlgorithmProcessor:
         channels = getattr(self.config, 'layout_indices', None)
         if channels is None:
             channels = params.get('indices_azimuth', list(range(len(virt_x))))
-        ant_x = virt_x[channels] / wavelength  # 归一化到波长
-        return ant_x, channels
+        legacy_ant_x = virt_x[channels] / wavelength
+        # [新增] 若设置了通道选择, 则用同一套布局几何按所选通道取坐标
+        return self.chan_sel_geometry(params, legacy_ant_x, list(channels), tag='Capon')
 
     def calculate_capon_aoa(self, phase_vec, params):
         """
@@ -1365,9 +1498,7 @@ class AlgorithmProcessor:
         # --- 预计算引导矢量的相位校准因子 (对齐 DBF / Dubhe Section 3.8.3) ---
         ant_x, channels = self._get_capon_antenna_x(params)
         if params.get('ant_calib_en', False):
-            calib_phase = np.array(params.get('ant_calib_phase',
-                                              [0.0] * 8), dtype=np.float64)
-            calib_sv = np.exp(1j * calib_phase[channels]).reshape(-1, 1)
+            calib_sv = np.exp(1j * self._calib_phase_for(params, channels)).reshape(-1, 1)
         else:
             calib_sv = np.ones((N, 1), dtype=np.complex64)
 
@@ -1419,10 +1550,15 @@ class AlgorithmProcessor:
         # 对快照维度进行 FFT, # Shape: (N_rx, N_tx, Range, Doppler)
         rd_cube = np.fft.fft(cube_no_static, axis=3)
         # --- 核心修改：统一天线映射逻辑 ---
-        # 将天线排列为 [TX0RX0, TX0RX1, TX0RX2, TX0RX3, TX1RX0, ...] 的 8 通道形式
+        # 将天线排列为 [TX0RX0, TX0RX1, TX0RX2, TX0RX3, TX1RX0, ...] 的通道形式
         # 这里使用 transpose(1, 0, 2, 3) 将其变为 (TX, RX, R, D)，然后 reshape
-        rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(8, rd_cube.shape[2], rd_cube.shape[3])
-        valid_indices = params.get('indices_azimuth', [0, 1, 2, 3, 4, 5, 6, 7])
+        num_ch = rd_cube.shape[0] * rd_cube.shape[1]
+        rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(num_ch, rd_cube.shape[2], rd_cube.shape[3])
+        valid_indices = self.channel_indices(
+            params, num_ch, default=params.get('indices_azimuth', list(range(num_ch))),
+            tag='POINT-CLOUD')
+        self.log_input('POINT-CLOUD', chan_sel=valid_indices, cube=current_cube,
+                       extra=f"CFAR={'选中通道' if params.get('cfar_only_selected', False) else '全部通道'}")
         # 4. 非相干累加得到能量图 (Power Map)
         # 根据开关决定 CFAR 使用哪些天线的能量
         if params.get('cfar_only_selected', False):
@@ -1507,8 +1643,10 @@ class AlgorithmProcessor:
         if cir_comb > 1:
             n_comb = current_cube.shape[3] // cir_comb
             trim = n_comb * cir_comb
-            current_cube = current_cube[:, :, :, :trim] \
-                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
+            # [修改] 通道维按实际布局(不再写死 4x2), 兼容 2T2R/1T4R 等布局
+            current_cube = current_cube[:, :, :, :trim].reshape(
+                current_cube.shape[0], current_cube.shape[1],
+                current_cube.shape[2], n_comb, cir_comb).mean(axis=4)
             # shape: (4, 2, 32, n_comb)
 
         # 2. 泄漏处理: np.roll 替代截断
@@ -1527,15 +1665,20 @@ class AlgorithmProcessor:
         # 5. Doppler FFT
         rd_cube = np.fft.fft(current_cube, axis=3)
 
-        # 6. 展平 8 通道 + 选通道 + 非相干合并
+        # 6. 展平通道 + 选通道 + 非相干合并
+        num_ch = rd_cube.shape[0] * rd_cube.shape[1]
         rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
-            8, rd_cube.shape[2], rd_cube.shape[3])
-        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
+            num_ch, rd_cube.shape[2], rd_cube.shape[3])
+        valid_indices = self.channel_indices(
+            params, num_ch, default=params.get('indices_azimuth', [2, 3, 6, 7]),
+            tag='POINT-CLOUD-OPTIMIZED')
         if params.get('cfar_only_selected', True):
             rd_sel = rd_cube_flat[valid_indices, :, :]
         else:
             rd_sel = rd_cube_flat
         power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)
+        self.log_input('POINT-CLOUD-OPTIMIZED', chan_sel=valid_indices, cube=current_cube,
+                       extra=f"CFAR={'选中通道' if params.get('cfar_only_selected', True) else '全部通道'}")
 
         # 7. CA-CFAR
         mask, noise_avg = self.perform_ca_cfar_2d(power_map, params)
@@ -1644,8 +1787,10 @@ class AlgorithmProcessor:
         if cir_comb > 1:
             n_comb = current_cube.shape[3] // cir_comb
             trim = n_comb * cir_comb
-            current_cube = current_cube[:, :, :, :trim] \
-                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
+            # [修改] 通道维按实际布局(不再写死 4x2), 兼容 2T2R/1T4R 等布局
+            current_cube = current_cube[:, :, :, :trim].reshape(
+                current_cube.shape[0], current_cube.shape[1],
+                current_cube.shape[2], n_comb, cir_comb).mean(axis=4)
         current_cube = np.roll(current_cube, -leakage_offset, axis=2)
         # if params.get('doppler_dc_remove', True):
         #     current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
@@ -1656,14 +1801,18 @@ class AlgorithmProcessor:
         rd_cube = np.fft.fft(current_cube, axis=3)
 
         # 6. 展平 + 选通道 + 非相干合并
+        num_ch = rd_cube.shape[0] * rd_cube.shape[1]
         rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
-            8, rd_cube.shape[2], rd_cube.shape[3])
-        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
+            num_ch, rd_cube.shape[2], rd_cube.shape[3])
+        valid_indices = self.channel_indices(
+            params, num_ch, default=params.get('indices_azimuth', [2, 3, 6, 7]),
+            tag='ANGLE-SPECTRUM')
         if params.get('cfar_only_selected', True):
             rd_sel = rd_cube_flat[valid_indices, :, :]
         else:
             rd_sel = rd_cube_flat
         power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)
+        self.log_input('ANGLE-SPECTRUM', chan_sel=valid_indices, cube=current_cube)
 
         # 7. CA-CFAR (与 step_point_cloud_optimized 相同)
         mask, noise_avg = self.perform_ca_cfar_2d(power_map, params)
@@ -1747,8 +1896,10 @@ class AlgorithmProcessor:
         if cir_comb > 1:
             n_comb = current_cube.shape[3] // cir_comb
             trim = n_comb * cir_comb
-            current_cube = current_cube[:, :, :, :trim] \
-                .reshape(4, 2, 32, n_comb, cir_comb).mean(axis=4)
+            # [修改] 通道维按实际布局(不再写死 4x2), 兼容 2T2R/1T4R 等布局
+            current_cube = current_cube[:, :, :, :trim].reshape(
+                current_cube.shape[0], current_cube.shape[1],
+                current_cube.shape[2], n_comb, cir_comb).mean(axis=4)
         current_cube = np.roll(current_cube, -leakage_offset, axis=2)
         # if params.get('doppler_dc_remove', True):
         #     current_cube = current_cube - np.mean(current_cube, axis=3, keepdims=True)
@@ -1759,10 +1910,14 @@ class AlgorithmProcessor:
         rd_cube = np.fft.fft(current_cube, axis=3)
 
         # 6. 展平 + 选通道
+        num_ch = rd_cube.shape[0] * rd_cube.shape[1]
         rd_cube_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
-            8, rd_cube.shape[2], rd_cube.shape[3])
-        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
+            num_ch, rd_cube.shape[2], rd_cube.shape[3])
+        valid_indices = self.channel_indices(
+            params, num_ch, default=params.get('indices_azimuth', [2, 3, 6, 7]),
+            tag='AS-RAW')
         rd_sel = rd_cube_flat[valid_indices, :, :]  # [n_ch, n_range, n_dop]
+        self.log_input('AS-RAW', chan_sel=valid_indices, cube=current_cube)
 
         # 初始化 DBF 引导矢量
         if getattr(self, '_dbf_sv', None) is None:
@@ -1828,7 +1983,7 @@ class AlgorithmProcessor:
         params = self.config.algo_params['RA-CFAR']
 
         # 1. 计算 Range-Azimuth 热力图 (Capon, 含 R^{-1} 和 chirp 原始数据)
-        H, ranges_m, angles_deg, A_all, R_inv_list = self._compute_ra_heatmap(params)
+        H, ranges_m, angles_deg, A_all, R_inv_list = self._compute_ra_heatmap(params, tag='RA-CFAR')
         if H is None:
             return None
 
@@ -1925,7 +2080,7 @@ class AlgorithmProcessor:
           返回热力图数据供 plot_panel 显示为 imshow.
         """
         params = self.config.algo_params['RA-CFAR']
-        H, ranges_m, angles_deg, _, _ = self._compute_ra_heatmap(params)
+        H, ranges_m, angles_deg, _, _ = self._compute_ra_heatmap(params, tag='RA-HEATMAP')
         if H is None:
             return None
         # dB 尺度更直观
@@ -1989,7 +2144,7 @@ class AlgorithmProcessor:
           4. 返回热力图 + 能量字典, 供 App 层做双条件判决+时序平滑
         """
         params = self.config.algo_params['RA-OCCUPANCY']
-        H, ranges_m, angles_deg, _, _ = self._compute_ra_heatmap(params)
+        H, ranges_m, angles_deg, _, _ = self._compute_ra_heatmap(params, tag='RA-OCCUPANCY')
         if H is None:
             return None
         # H = np.fliplr(H)
@@ -2306,9 +2461,7 @@ class AlgorithmProcessor:
         # --- 预计算引导矢量的相位校准因子 (对齐 DBF / Dubhe Section 3.8.3) ---
         ant_x, channels = self._get_capon_antenna_x(params)
         if params.get('ant_calib_en', False):
-            calib_phase = np.array(params.get('ant_calib_phase',
-                                              [0.0] * 8), dtype=np.float64)
-            calib_sv = np.exp(-1j * calib_phase[channels]).reshape(-1, 1)
+            calib_sv = np.exp(-1j * self._calib_phase_for(params, channels)).reshape(-1, 1)
         else:
             calib_sv = np.ones((N, 1), dtype=np.complex64)
 
@@ -2373,15 +2526,19 @@ class AlgorithmProcessor:
 
         # 3. Doppler FFT + 展平 + 选通道 + 非相干合并
         rd_cube = np.fft.fft(current_cube, axis=3)
+        num_ch = rd_cube.shape[0] * rd_cube.shape[1]
         rd_flat = rd_cube.transpose(1, 0, 2, 3).reshape(
-            8, rd_cube.shape[2], rd_cube.shape[3])
-        valid_indices = params.get('indices_azimuth', [2, 3, 6, 7])
+            num_ch, rd_cube.shape[2], rd_cube.shape[3])
+        valid_indices = self.channel_indices(
+            params, num_ch, default=params.get('indices_azimuth', [2, 3, 6, 7]),
+            tag='POINT-CLOUD-PAPER')
         if params.get('cfar_only_selected', True):
             rd_sel = rd_flat[valid_indices, :, :]
         else:
             rd_sel = rd_flat
         power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)  # (Range, Doppler)
         n_range, n_dop = power_map.shape
+        self.log_input('POINT-CLOUD-PAPER', chan_sel=valid_indices, cube=current_cube)
 
         # 4. 速度门限掩码
         v_min = params.get('doppler_sum_v_min', 1)
@@ -2447,7 +2604,13 @@ class AlgorithmProcessor:
                 channels = params.get('ant_dbf_select', valid_indices)
                 all_virt_x = np.array([-0.038, 0.0, -0.038, -0.019,
                                        0.0, 0.038, 0.0, 0.019])
-                ant_x = all_virt_x[channels] / wavelength
+                channels = [int(c) for c in channels if 0 <= int(c) < len(all_virt_x)]
+                if not channels:
+                    channels = list(range(len(all_virt_x)))
+                legacy_ant_x = all_virt_x[channels] / wavelength
+                # [新增] 设置通道选择时改用布局几何(否则保持原硬编码表)
+                ant_x, channels = self.chan_sel_geometry(
+                    params, legacy_ant_x, channels, tag='PAPER-DBF')
                 self._dbf_angles_cache = np.linspace(
                     np.deg2rad(angle_deg_range[0]),
                     np.deg2rad(angle_deg_range[1]),
@@ -2456,9 +2619,7 @@ class AlgorithmProcessor:
                     -1j * 2 * np.pi *
                     ant_x[:, np.newaxis] * np.sin(self._dbf_angles_cache[np.newaxis, :]))
                 if params.get('ant_calib_en', False):
-                    calib_phase = np.array(params.get('ant_calib_phase',
-                                          [0.0] * 8), dtype=np.float64)
-                    calib = np.exp(1j * calib_phase[channels])
+                    calib = np.exp(1j * self._calib_phase_for(params, channels))
                     self._dbf_sv_cache = self._dbf_sv_cache * calib[:, np.newaxis]
 
         # ==================== Pass 2 & 3: Per detected Range ====================
@@ -2637,6 +2798,13 @@ class AlgorithmProcessor:
 
         return r_fine, d_fine
 
+    def _calib_phase_for(self, params, channels):
+        """按通道取相位校准量; 长度不足时按 0 处理, 避免索引越界."""
+        phase = params.get('ant_calib_phase') or []
+        return np.asarray(
+            [float(phase[int(c)]) if 0 <= int(c) < len(phase) else 0.0 for c in channels],
+            dtype=np.float64)
+
     def _init_dbf_steering(self, params):
         """预计算 DBF 引导矢量矩阵（OPTIMIZED 和 DUBHE 共用）"""
         wavelength = 2.99792458e8 / params['center_freq']
@@ -2644,7 +2812,12 @@ class AlgorithmProcessor:
         # 8通道虚拟天线 x 坐标 (m): [TX1-RX4, TX1-RX5, TX1-RX6, TX1-RX7,
         #                            TX2-RX4, TX2-RX5, TX2-RX6, TX2-RX7]
         all_virt_x = np.array([0.0 * wavelength , 0.5*wavelength , 1*wavelength, 0.5*wavelength, 0.5*wavelength, wavelength, 0*wavelength, -0.5*wavelength])
-        ant_x = all_virt_x[channels] / wavelength
+        channels = [int(c) for c in channels if 0 <= int(c) < len(all_virt_x)]
+        if not channels:
+            channels = list(range(len(all_virt_x)))
+        legacy_ant_x = all_virt_x[channels] / wavelength
+        # [新增] 设置通道选择时统一改用布局几何(否则保持原硬编码表)
+        ant_x, channels = self.chan_sel_geometry(params, legacy_ant_x, channels, tag='DBF')
 
         azi_deg = np.linspace(params['azi_angle_range'][0],
                               params['azi_angle_range'][1],
@@ -2652,12 +2825,11 @@ class AlgorithmProcessor:
         self._dbf_angles = np.deg2rad(azi_deg)
         self._dbf_sv = np.exp(-1j * 2 * np.pi *
                               ant_x[:, np.newaxis] * np.sin(self._dbf_angles[np.newaxis, :]))
+        self._dbf_channels = list(channels)
 
         # 相位标定: 对齐 Dubhe 文档 Section 3.8.3 / Table 9
         if params.get('ant_calib_en', False):
-            calib_phase = np.array(params.get('ant_calib_phase',
-                                  [0] * 8), dtype=np.float64)
-            calib = np.exp(1j * calib_phase[channels])
+            calib = np.exp(1j * self._calib_phase_for(params, channels))
             self._dbf_sv = self._dbf_sv * calib[:, np.newaxis]
 
     def _init_capon_steering(self, params):
@@ -2665,9 +2837,7 @@ class AlgorithmProcessor:
         ant_x, channels = self._get_capon_antenna_x(params)
         # 相位校准因子 (与 calculate_capon_aoa 一致)
         if params.get('ant_calib_en', False):
-            calib_phase = np.array(params.get('ant_calib_phase',
-                                  [0.0] * 8), dtype=np.float64)
-            calib_sv = np.exp(1j * calib_phase[channels]).reshape(-1, 1)
+            calib_sv = np.exp(1j * self._calib_phase_for(params, channels)).reshape(-1, 1)
         else:
             calib_sv = np.ones((len(channels), 1), dtype=np.complex64)
 
@@ -2680,10 +2850,11 @@ class AlgorithmProcessor:
                                 ant_x[:, np.newaxis] * np.sin(self._capon_angles[np.newaxis, :]))
         # sv = sv * calib_sv  ← 与 calculate_capon_aoa 一致
         self._capon_sv = self._capon_sv * calib_sv
-        print("[CAPON] channels=", channels, "ant_x(λ)=", np.round(ant_x, 3),
-              "calib_en=", params.get('ant_calib_en'))
+        self._capon_channels = list(channels)
+        print("[CAPON] channels=", list(channels), "ant_x(λ)=", np.round(ant_x, 3),
+              f"P={len(channels)}", "calib_en=", params.get('ant_calib_en'))
 
-    def _compute_ra_heatmap(self, params):
+    def _compute_ra_heatmap(self, params, tag='RA'):
         """
         计算 Range-Azimuth 热力图 (Bartlett/DBF, 多chirp协方差).
 
@@ -2723,22 +2894,39 @@ class AlgorithmProcessor:
         current_cube, range_bin_start = apply_range_bin_selection(
             current_cube, params, return_start_bin=True)
 
-        # 展平全部通道 → 按 indices_azimuth 选取
+        # 展平全部通道 → 按布局(或全局通道选择)选取
         # current_cube: (num_rx, num_tx, 32 range, L chirps)
         cube_flat = current_cube.transpose(1, 0, 2, 3).reshape(
             num_chan, current_cube.shape[2], current_cube.shape[3])
-        valid_indices = getattr(self.config, 'layout_indices', None)
-        if valid_indices is None:
-            valid_indices = params.get('indices_azimuth',
-                                       list(range(num_chan)))
-        A_all = cube_flat[valid_indices, :, :]  # (len(valid_indices), 32, L)
+        legacy_indices = getattr(self.config, 'layout_indices', None)
+        if legacy_indices is None:
+            legacy_indices = params.get('indices_azimuth', list(range(num_chan)))
+        valid_indices = self.channel_indices(
+            params, num_chan, default=list(legacy_indices), tag=tag)
+        A_all = cube_flat[valid_indices, :, :]  # (len(valid_indices), n_range, L)
 
         # 初始化 Capon 导向矢量 (用真实天线位置, 非 ULA 假设)
-        if getattr(self, '_capon_sv', None) is None:
+        # [修改] 几何相关参数(通道/角度栅格/频点/校准)变化时自动重建, 无需重启 GUI
+        capon_sig = (tuple(int(c) for c in valid_indices),
+                     float(params.get('center_freq', 0.0)),
+                     int(params.get('azimuth_num', 0)),
+                     tuple(float(v) for v in params.get('azi_angle_range', ())),
+                     bool(params.get('ant_calib_en', False)),
+                     tuple(float(v) for v in (params.get('ant_calib_phase') or [])))
+        if (getattr(self, '_capon_sv', None) is None
+                or getattr(self, '_capon_sig', None) != capon_sig):
             self._init_capon_steering(params)
+            self._capon_sig = capon_sig
+        if self._capon_sv.shape[0] != A_all.shape[0]:
+            print(f"[CAPON] 通道数不匹配: 导向矢量 {self._capon_sv.shape[0]} "
+                  f"vs 数据 {A_all.shape[0]}, 跳过该帧")
+            return None, None, None
         I = len(self._capon_angles)
         K = A_all.shape[1]
         L = A_all.shape[2]
+        self.log_input(tag, chan_sel=valid_indices, cube=A_all,
+                       extra=f"range_bin={K} chirp={L} P={len(valid_indices)}/{num_chan} "
+                             f"角度栅格={I}")
 
         # 对每个 range bin: Capon 波束形成 (论文 Eq.11-13)
         # R_k = A_k·A_k^H / L + βI,  H(k,θ) = 1 / Re(a(θ)^H · R_k^{-1} · a(θ))
@@ -3013,14 +3201,16 @@ class AlgorithmProcessor:
         # --- Phase 1: 相干积累 (post background-removal) ---
         n_frames = all_c.shape[3]
         for i in range(n_frames):
-            frame = all_c[:, :, :, i]  # (4, 2, 32)
+            frame = all_c[:, :, :, i]  # (num_rx, num_tx, ft_len)
+            if self.dubhe_accum.shape != frame.shape:
+                self.dubhe_accum = np.zeros_like(frame)   # 布局/协议变化时自适应
             self.dubhe_accum += frame
             self.dubhe_accum_cnt += 1
             if self.dubhe_accum_cnt >= cir_comb:
                 combined = self.dubhe_accum / cir_comb
                 self.dubhe_ring.append(combined)
                 self.dubhe_new_comb_cnt += 1
-                self.dubhe_accum = np.zeros((4, 2, 32), dtype=np.complex64)
+                self.dubhe_accum = np.zeros_like(frame)
                 self.dubhe_accum_cnt = 0
 
         # --- Phase 2: 判断是否输出 ---
@@ -3049,10 +3239,13 @@ class AlgorithmProcessor:
         rd_cube = np.fft.fft(cube_2d, n=n_fft, axis=3)
 
         # --- Phase 7: SISO 非相干合并 ---
-        rd_flat = rd_cube.transpose(1, 0, 2, 3).reshape(8, rd_cube.shape[2], n_fft)
-        siso_ch = params['siso_ch']
+        num_ch = rd_cube.shape[0] * rd_cube.shape[1]
+        rd_flat = rd_cube.transpose(1, 0, 2, 3).reshape(num_ch, rd_cube.shape[2], n_fft)
+        siso_ch = self.channel_indices(
+            params, num_ch, default=params['siso_ch'], tag='POINT-CLOUD-DUBHE')
         rd_sel = rd_flat[siso_ch, :, :]
         power_map = np.sum(np.abs(rd_sel) ** 2, axis=0)
+        self.log_input('POINT-CLOUD-DUBHE', chan_sel=siso_ch, cube=cube_2d)
 
         # --- Phase 8: NVE (沿 Doppler 轴取中值) ---
         noise_floor = np.median(power_map, axis=1, keepdims=True)
@@ -4898,6 +5091,9 @@ class ControlPanel(tk.Frame):
         self.cb_layout.set(config.current_layout_name)
         self.cb_layout.pack(side='right', fill='x', expand=True)
         self.cb_layout.bind("<<ComboboxSelected>>", self._on_layout_change)
+
+        # --- [新增] 全局通道选择: 进入算法的通道(虚拟通道索引, tx主序), 如 0,1,3; 空=跟随布局 ---
+        self._entry(frm_algo, "Chan Sel:", "algo_chan_sel")
 
         # --- RA-OCCUPANCY 显示模式: 热力图 / 定位图(仅峰值红点) ---
         self.frm_ra_occ_view = tk.Frame(frm_algo, bg='#f0f0f0')
