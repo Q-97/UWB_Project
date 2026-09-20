@@ -453,7 +453,7 @@ DEFAULT_ALGO_PARAMS = {
         "ant_calib_en": False,
         "ant_calib_phase": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "capon_diag_load": 1e-3,
-        "dist_per_tap": 0.1875,
+        "dist_per_tap": 0.15,
         # ---- 后处理 ----
         "smooth_kernel": [2, 4],        # 卷积平滑核大小 [rows, cols], 可调
         "oa_mean_threshold": 0.0,
@@ -2889,8 +2889,8 @@ class AlgorithmProcessor:
         if cir_comb > 1:
             n_comb = current_cube.shape[3] // cir_comb
             trim = n_comb * cir_comb
-            current_cube = current_cube[:, :, :16, :trim] \
-                .reshape(num_rx, num_tx, 16, n_comb, cir_comb).mean(axis=4)
+            current_cube = current_cube[:, :, :32, :trim] \
+                .reshape(num_rx, num_tx, 32, n_comb, cir_comb).mean(axis=4)
         current_cube, range_bin_start = apply_range_bin_selection(
             current_cube, params, return_start_bin=True)
 
@@ -2923,6 +2923,7 @@ class AlgorithmProcessor:
             return None, None, None
         I = len(self._capon_angles)
         K = A_all.shape[1]
+        print(f"{A_all.shape}")
         L = A_all.shape[2]
         self.log_input(tag, chan_sel=valid_indices, cube=A_all,
                        extra=f"range_bin={K} chirp={L} P={len(valid_indices)}/{num_chan} "
@@ -2949,6 +2950,7 @@ class AlgorithmProcessor:
         range_zero_bin = float(params.get('range_zero_bin', range_bin_start))
         range_start_bins = max(0.0, range_bin_start - range_zero_bin)
         ranges_m = (range_start_bins + np.arange(K)) * params['dist_per_tap']
+        print(f"{ranges_m}")
         angles_deg = np.rad2deg(self._capon_angles)
         return H, ranges_m, angles_deg, A_all, R_inv_list
 
