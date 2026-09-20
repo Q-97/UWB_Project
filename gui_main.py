@@ -472,8 +472,8 @@ DEFAULT_ALGO_PARAMS = {
         "heatmap_clim_vmax": 0,
         "heatmap_background_color": "#f2f2f2",
         # ---- 显示模式: 热力图 / 定位图(仅峰值红点) ----
-        "ra_occ_show_localization": False,      # False=热力图(默认) / True=定位图
-        "ra_occ_marker_size": 8.0,              # 定位图红点大小 (pt)
+        "ra_occ_show_localization": True,      # False=热力图(默认) / True=定位图
+        "ra_occ_marker_size": 16.0,              # 定位图红点大小 (pt)
         "ra_occ_localization_smooth": "mode",   # off/mode/mean: 红点位置取最近N帧众数/均值
         "ra_occ_localization_hold_sec": 1.0,    # >0: 峰值失效后红点保持该秒数再消失
     },
@@ -2111,6 +2111,27 @@ class AlgorithmProcessor:
             return 0.0
         return float(np.max(H[mask]))
 
+    def _ra_cartesian_window(self, params, ranges_m):
+        """推导 RA Cartesian 显示窗口, 返回 (xlim, y_min, y_max).
+
+        默认(ra_occ_auto_range_axis=True)按数据实际覆盖范围推导, 使坐标轴刻度
+        与 tap 距离对齐:
+          Y 下沿 = 最远距离(正前方的数据边界), Y 上沿 = 0(雷达原点),
+          X 半宽 = min(plot_xlim, 最远距离 x sin(半FOV)) —— 避免刻度落在无数据区.
+        关闭该开关时退回原有手填参数, 行为与从前完全一致.
+        """
+        r_max = float(ranges_m[-1]) if len(ranges_m) else 0.0
+        if not params.get('ra_occ_auto_range_axis', True) or r_max <= 0:
+            return (float(params.get('plot_xlim', 1.5)),
+                    float(params.get('plot_ylim_min', -6.0)),
+                    float(params.get('plot_ylim_max', -0.1)))
+        azi = params.get('azi_angle_range', [-90.0, 90.0])
+        half_fov = 0.5 * abs(float(azi[1]) - float(azi[0])) if len(azi) >= 2 else 90.0
+        x_lim = min(float(params.get('plot_xlim', 1.5)),
+                    r_max * np.sin(np.deg2rad(min(half_fov, 90.0))))
+        x_lim = max(x_lim, 0.05)
+        return x_lim, -r_max, 0.0
+
     def _ra_to_cartesian(self, H, ranges_m, angles_deg,
                           x_range=(-3, 3), y_range=(-6, 0), res=0.05):
         """
@@ -2179,12 +2200,12 @@ class AlgorithmProcessor:
             energy_dict[name] = {'main': main_e, 'child_special': special_e}
 
         # Cartesian 重映射 (直接使用背景减除后的 H_bg 线性功率)
-        xlim = params.get('plot_xlim', 1.5)
-        y_min = params.get('plot_ylim_min', -6.0)
-        y_max = params.get('plot_ylim_max', -0.1)
+        # [新增] 默认按数据实际范围自动推导显示窗口, 使坐标轴刻度与 tap 距离对齐
+        xlim, y_min, y_max = self._ra_cartesian_window(params, ranges_m)
         H_cart, xs_cart, ys_cart = self._ra_to_cartesian(
             H_bg, ranges_m, angles_deg,
-            x_range=(-xlim, xlim), y_range=(y_min, y_max), res=0.05)
+            x_range=(-xlim, xlim), y_range=(y_min, y_max),
+            res=float(params.get('ra_occ_cart_res_m', 0.05)))
 
         # Cartesian heatmap peak, retained separately from the polar RA peak.
         iy, ix = np.unravel_index(np.nanargmax(H_cart), H_cart.shape)
@@ -2205,6 +2226,12 @@ class AlgorithmProcessor:
             'peak_y_m': peak_y_m,
             'energy': energy_dict,
             'params': params,
+            # [新增] 距离轴/窗口信息, 供界面标注与刻度弧使用
+            'range_max_m': float(ranges_m[-1]) if len(ranges_m) else 0.0,
+            'n_range_bins': int(len(ranges_m)),
+            'dist_per_tap_m': float(params.get('dist_per_tap', 0.0)),
+            'plot_window': (float(xs_cart[0]), float(xs_cart[-1]),
+                            float(ys_cart[0]), float(ys_cart[-1])),
         }
 
     # ===== Multipass CFAR (IEEE Sensors Journal 2024) helpers =====
@@ -3943,6 +3970,14 @@ class PlotPanel(tk.Frame):
                 zorder=5,                      # 压在座位椭圆/标号之上
                 scalex=False, scaley=False)
             self.plots['ra_occ_marker'].set_visible(self.plots['ra_occ_view'])
+
+            # ---- [新增] 距离刻度弧 / 数据覆盖边界 / 范围角标 (位置在 update_data 按实际距离重建) ----
+            self.plots['ra_occ_rings'] = []
+            self._ra_occ_ring_sig = None
+            self.plots['ra_occ_ring_info'] = ax_hm.text(
+                0.012, 0.985, "", transform=ax_hm.transAxes,
+                ha='left', va='top', fontsize=8, color='#333333', zorder=8,
+                bbox=dict(facecolor='white', alpha=0.65, edgecolor='none', pad=1.5))
             self.plots['ra_occ_oa_button'] = patches.Rectangle(
                 (0.72, 1.21), 0.24, 0.065, transform=ax_hm.transAxes,
                 facecolor='green', edgecolor='#222222', linewidth=1.2,
@@ -4088,6 +4123,52 @@ class PlotPanel(tk.Frame):
 
             self.axes = {'as': ax_as, 'rd': ax_rd}
         self.canvas.draw()
+
+    def _update_ra_occ_rings(self, params, ranges_m, window):
+        """[新增] 按当前数据范围绘制距离刻度弧与数据覆盖边界.
+
+        只在距离范围/刻度间隔/窗口变化时重建(避免每帧增删 artist);
+        ra_occ_show_range_rings=False 时清除全部弧线.
+        """
+        ax = self.axes.get('main')
+        if ax is None or ranges_m is None or len(ranges_m) == 0:
+            return
+        r_max = float(ranges_m[-1])
+        show = bool(params.get('ra_occ_show_range_rings', True))
+        try:
+            step = float(params.get('ra_occ_range_ring_step_m', 0.5) or 0.5)
+        except (TypeError, ValueError):
+            step = 0.5
+        sig = (round(r_max, 6), round(step, 6), show,
+               tuple(round(float(v), 6) for v in (window or ())))
+        if sig == getattr(self, '_ra_occ_ring_sig', None):
+            return
+        self._ra_occ_ring_sig = sig
+
+        for artist in self.plots.get('ra_occ_rings', []) or []:
+            try:
+                artist.remove()
+            except (ValueError, AttributeError):
+                pass
+        rings = []
+        if show and r_max > 0 and step > 0:
+            def _arc(radius, **kw):
+                a = patches.Arc((0.0, 0.0), 2 * radius, 2 * radius,
+                                theta1=180, theta2=360, zorder=4, **kw)
+                ax.add_patch(a)
+                return a
+
+            for k in range(1, int(np.floor(r_max / step + 1e-9)) + 1):
+                r = k * step
+                rings.append(_arc(r, edgecolor='#888888', linewidth=0.7,
+                                  linestyle=(0, (4, 3)), alpha=0.75))
+                rings.append(ax.text(
+                    -0.04, -r, f"{r:.2f} m", ha='right', va='center',
+                    fontsize=7, color='#555555', zorder=8,
+                    bbox=dict(facecolor='white', alpha=0.6, edgecolor='none', pad=0.8)))
+            # 数据覆盖边界 = 最远距离, 用实线强调
+            rings.append(_arc(r_max, edgecolor='#d62728', linewidth=1.2, alpha=0.9))
+        self.plots['ra_occ_rings'] = rings
 
     def set_ra_occ_view(self, localization):
         """切换 RA-OCCUPANCY 显示模式.
@@ -4384,6 +4465,22 @@ class PlotPanel(tk.Frame):
             self.plots['ra_occ_hm'].set_extent([xs_cart[0], xs_cart[-1],
                                                 ys_cart[0], ys_cart[-1]])
             p = data.get('params', {})
+            # ---- [新增] 坐标轴与数据范围对齐: 锁定窗口 + 距离刻度弧 + 范围角标 ----
+            self._ra_occ_last_extent = (float(xs_cart[0]), float(xs_cart[-1]),
+                                        float(ys_cart[0]), float(ys_cart[-1]))
+            self.axes['main'].set_xlim(self._ra_occ_last_extent[0],
+                                       self._ra_occ_last_extent[1])
+            self.axes['main'].set_ylim(self._ra_occ_last_extent[2],
+                                       self._ra_occ_last_extent[3])
+            self._update_ra_occ_rings(p, data.get('ranges_m'),
+                                      data.get('plot_window'))
+            if 'ra_occ_ring_info' in self.plots:
+                r_max = float(data.get('range_max_m') or 0.0)
+                n_bins = int(data.get('n_range_bins') or 0)
+                dpt = float(data.get('dist_per_tap_m') or p.get('dist_per_tap', 0.0))
+                self.plots['ra_occ_ring_info'].set_text(
+                    f"R 0.00-{r_max:.2f} m | {n_bins} taps x {dpt:.3f} m"
+                    f" | 窗 X ±{xs_cart[-1]:.2f}, Y {ys_cart[0]:.2f}~{ys_cart[-1]:.2f} m")
             clim_mode = p.get('heatmap_clim_mode', 'auto')
             if clim_mode == 'fixed':
                 vmin = p.get('heatmap_clim_vmin', -80)
