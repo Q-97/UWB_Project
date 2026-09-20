@@ -16,7 +16,7 @@
     "num_rx_antennas": 2,
     "rx_antenna_start_num": 1,
     "connection_mode": "SERIAL",
-    "serial_port": "COM4",
+    "serial_port": "COM13",
     "baud_rate": 1000000,
     "udp_ip": "127.0.0.1",
     "udp_port": 55555,
@@ -474,7 +474,7 @@
       "heatmap_clim_vmax": 0,
       "heatmap_background_color": "#f2f2f2",
       "ra_occ_show_localization": true,
-      "ra_occ_marker_size": 8.0,
+      "ra_occ_marker_size": 16.0,
       "ra_occ_localization_smooth": "mode",
       "ra_occ_localization_hold_sec": 1.0,
       "occupancy_config": {
