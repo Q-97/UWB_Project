@@ -1,1 +1,18 @@
 * text=auto eol=lf
+*.lib binary
+*.exe binary
+*.dll binary
+*.o binary
+*.d binary
+*.axf binary
+*.hex binary
+*.bin binary
+*.text binary
+*.map binary
+*.uvprojx binary
+*.uvoptx binary
+*.doc binary
+*.docx binary
+*.pdf binary
+*.tflite binary
+*.zip binary

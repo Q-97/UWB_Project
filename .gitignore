@@ -1,24 +1,6 @@
-# ===== Python 缓存 =====
-__pycache__/
-*.pyc
-*.pyo
-
-# ===== IDE / 编辑器 / 个人工具配置 =====
-.idea/
-.vscode/
-.claude/
-.agents/
-.DS_Store
-Thumbs.db
-
-# ===== 运行时生成 / 本地数据（不入库） =====
-# 采样原始数据与样本输出
-data/
-in_b2_d3_l1_1/
-# 模型文件（训练产物，按需本地拷贝，如 ./model/epoch-25-val-f1-100.0-sp-100.0.tflite）
-model/
-# 文档转换输出
-pdf_output/
-
-# ===== 参考资料（大体积二进制，不入库） =====
+# ===== 仓库根 =====
 *.pdf
+开发环境相关/
+.git_bak/
+Thumbs.db
+.DS_Store
